@@ -39,3 +39,5 @@ export function modelsFromEnv(): ScoutModels {
     ...(extract === undefined ? {} : { extract }),
   };
 }
+
+// Import proof (2026-10-13): this line must arrive here as scout-pr/N with this author.
