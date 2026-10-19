@@ -555,11 +555,16 @@ describe('a click that starts a download took effect', () => {
     readonly earlier?: readonly DownloadStart[];
     /** The host keeps what the clicks download. */
     readonly saved?: boolean;
+    /** A motor program after the head, on the given step. */
+    readonly then?: (step: number) => readonly Action[] | undefined;
   }): { readonly h: Harness; readonly deps: AgentDeps } {
     const lateMs = DEFAULT_CHECK_POLICY.graceMs + 400;
     const begun: { readonly at: number; readonly download: DownloadStart }[] = (options.earlier ?? []).map((download) => ({ at: 0, download }));
     const h: Harness = harness({
-      model: (_prompt, step) => ({ action: options.model(step) }),
+      model: (_prompt, step) => {
+        const then = options.then?.(step);
+        return { action: options.model(step), ...(then === undefined ? {} : { envelope: { then } }) };
+      },
       tabs: [
         { id: 't0', url: listing.url },
         { id: 't1', url: `${ORIGIN}/` },
@@ -638,6 +643,25 @@ describe('a click that starts a download took effect', () => {
     }
   });
 
+  test('a download begun by a click in the motor program confirms the step too', async () => {
+    const { h, deps } = downloading({
+      model: (step) => (step === 0 ? SCROLL : DONE),
+      then: (step) => (step === 0 ? [clickFile(1)] : undefined),
+      begin: (action) => {
+        const file = fileOf(action);
+        return file === undefined ? undefined : { tab: 't0', file };
+      },
+      saved: true,
+    });
+    const result = await runAgent(deps, { task: 'download the pdf', caps: CAPS, stepFailures: 0, settle: false, verify: true, program: 2 });
+
+    expect(h.performed.map((action) => action.type)).toEqual(['scroll', 'click']);
+    expect(result.steps[0]?.check?.verdict).toBe('confirmed');
+    expect(result.steps[0]?.check?.saw).toContain('download of "sample.pdf"');
+    expect(result.steps[0]?.check?.saw).toContain('being saved');
+    expect(result.stopReason).toBe('task-complete');
+  });
+
   test('a click that changes nothing is still contradicted and charged, whatever the ledger already held', async () => {
     const { deps } = downloading({
       model: (step) => (step === 0 ? CLICK : DONE),
@@ -663,6 +687,71 @@ describe('a click that starts a download took effect', () => {
     const result = await runAgent(deps, { task: 'download a file', caps: CAPS, stepFailures: 0, settle: false, verify: true });
 
     expect(result.steps[0]?.check?.verdict).toBe('contradicted');
+    expect(result.stopReason).toBe('error');
+  });
+});
+
+describe('a navigate the browser turned into a download took effect', () => {
+  // The trace shape of run_a8d59839 step 4 (fleet, browser .59, 2026-10-19):
+  // the navigate failed `net::ERR_ABORTED` while the file was being stored.
+  const ORIGIN = 'https://was1-vin.speedtest.network.ovh.net';
+  const FILE = `${ORIGIN}/files/1Mb.dat`;
+  const landing = tree(node({ role: 'RootWebArea', name: 'OVH speed test', children: [node({ role: 'button', name: 'Refresh', ref: BUTTON })] }), `${ORIGIN}/`);
+
+  function navigating(options: { readonly error: string; readonly begins?: { readonly tab: string; readonly lateMs: number } }): AgentDeps {
+    const begun: { readonly at: number; readonly download: DownloadStart }[] = [];
+    const h: Harness = harness({
+      model: (_prompt, step) => ({ action: step === 0 ? { type: 'navigate', url: FILE } : DONE }),
+      tabs: [
+        { id: 't0', url: landing.url },
+        { id: 't1', url: `${ORIGIN}/other` },
+      ],
+      tabTree: () => landing,
+      perform: (action) => {
+        if (action.type !== 'navigate') return;
+        if (options.begins !== undefined) {
+          begun.push({
+            at: h.clock.now() + options.begins.lateMs,
+            download: { id: 'guid-1', tab: options.begins.tab, url: FILE, filename: '1Mb.dat', saved: true },
+          });
+        }
+        throw new Error(`navigate(${FILE}) failed: ${options.error}`);
+      },
+    });
+    return { ...h.deps, downloads: () => begun.filter((entry) => entry.at <= h.clock.now()).map((entry) => entry.download) };
+  }
+  const run = async (deps: AgentDeps) =>
+    await runAgent(deps, { task: 'download the 1 MB test file', caps: CAPS, stepFailures: 0, settle: false, verify: true });
+
+  for (const lateMs of [0, 400]) {
+    test(`is a confirmed download, not a failed step, with the announcement ${lateMs === 0 ? 'already in' : 'trailing the answer'}`, async () => {
+      const result = await run(navigating({ error: 'net::ERR_ABORTED', begins: { tab: 't0', lateMs } }));
+
+      expect(result.steps[0]?.error).toBeUndefined();
+      expect(result.steps[0]?.check?.verdict).toBe('confirmed');
+      expect(result.steps[0]?.check?.saw).toContain('download of "1Mb.dat"');
+      expect(result.steps[0]?.check?.saw).toContain('being saved for the person who started this run');
+      expect(result.steps[0]?.check?.download).toEqual({ filename: '1Mb.dat', url: FILE });
+      expect(result.ruledOut).toEqual([]);
+      expect(result.stopReason).toBe('task-complete');
+    });
+  }
+
+  test('ERR_ABORTED with no download begun is still a failed step', async () => {
+    const result = await run(navigating({ error: 'net::ERR_ABORTED' }));
+    expect(result.steps[0]?.error).toContain('net::ERR_ABORTED');
+    expect(result.stopReason).toBe('error');
+  });
+
+  test('another failure is still a failure, whatever the ledger shows', async () => {
+    const result = await run(navigating({ error: 'net::ERR_NAME_NOT_RESOLVED', begins: { tab: 't0', lateMs: 0 } }));
+    expect(result.steps[0]?.error).toContain('net::ERR_NAME_NOT_RESOLVED');
+    expect(result.stopReason).toBe('error');
+  });
+
+  test("a download another open tab began meanwhile does not excuse this tab's navigate", async () => {
+    const result = await run(navigating({ error: 'net::ERR_ABORTED', begins: { tab: 't1', lateMs: 0 } }));
+    expect(result.steps[0]?.error).toContain('net::ERR_ABORTED');
     expect(result.stopReason).toBe('error');
   });
 });

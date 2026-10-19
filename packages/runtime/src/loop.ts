@@ -169,6 +169,7 @@ import {
   checkReportedUrl,
   contradictionKey,
   contradictionNote,
+  describeExpectation,
   expectationFor,
   expectationForProgram,
   refusedSubmitCheck,
@@ -6560,6 +6561,54 @@ function downloadSaw(download: DownloadStart): string {
 }
 
 /**
+ * The download a `navigate` or `openTab` became, or `undefined` when its
+ * failure was a failure.
+ *
+ * Chromium ends a navigation whose response is a download with
+ * `net::ERR_ABORTED`, so the host reports the navigate failed while the file
+ * is downloading. Measured on the fleet (browser .59, 2026-10-19 21:56Z, n=1,
+ * run_a8d59839 step 4): `navigate https://…/files/1Mb.dat` failed
+ * `net::ERR_ABORTED`, the loop recorded a failed step and the model gave up,
+ * and the worker stored that file (`download.stored`) the same second.
+ *
+ * A download only when both hold: the failure is `ERR_ABORTED`, and the
+ * host's ledger shows a download that is new since the action and that
+ * `ownTab` accepts. The announcement can trail the navigate's answer by a
+ * round trip, so it is waited for up to {@link DOWNLOAD_BEGIN_WAIT_MS}.
+ */
+async function downloadInstead(
+  error: unknown,
+  readDownloads: (() => readonly DownloadStart[]) | undefined,
+  before: ReadonlySet<string> | undefined,
+  ownTab: (tab: TabId) => boolean,
+  clock: Clock,
+): Promise<DownloadStart | undefined> {
+  if (readDownloads === undefined || before === undefined) return undefined;
+  if (!(error instanceof Error) || !error.message.includes('net::ERR_ABORTED')) return undefined;
+  const begun = (): DownloadStart | undefined => readDownloads().find((download) => !before.has(download.id) && ownTab(download.tab));
+  let found = begun();
+  const waitUntil = clock.now() + DOWNLOAD_BEGIN_WAIT_MS;
+  while (found === undefined && clock.now() < waitUntil) {
+    await clock.sleep(DOWNLOAD_BEGIN_POLL_MS);
+    found = begun();
+  }
+  return found;
+}
+
+/** The check a download confirms: the browser's own word that the action took effect. */
+function downloadCheck(base: { readonly expected: string; readonly reads: number; readonly elapsedMs: number }, begun: DownloadStart): CheckTrace {
+  return {
+    ...base,
+    verdict: 'confirmed',
+    saw: downloadSaw(begun),
+    download: {
+      filename: begun.filename,
+      url: begun.url.length > MAX_DOWNLOAD_URL_CHARS ? `${begun.url.slice(0, MAX_DOWNLOAD_URL_CHARS)}…` : begun.url,
+    },
+  };
+}
+
+/**
  * What the model is told when its answer fills the schema and answers nothing.
  *
  * The draft is QUOTED BACK, field by field. That is the whole point of
@@ -12266,12 +12315,18 @@ export async function runAgent<T = unknown>(
             /**
              * The downloads the browser had already begun, so the check below
              * credits this action only with one it began. Read before the
-             * action and only when there will be an effect to judge.
+             * action, when there will be an effect to judge or the action
+             * loads a document, which the browser may turn into a download
+             * (see {@link downloadInstead}).
              */
+            const loadsDocument = action.type === 'navigate' || action.type === 'openTab';
             const downloadsBefore =
-              expectation.kind === 'effect' && deps.downloads !== undefined
+              (expectation.kind === 'effect' || loadsDocument) && deps.downloads !== undefined
                 ? new Set(deps.downloads().map((download) => download.id))
                 : undefined;
+            /** The download a `navigate` or `openTab` became instead of a page. */
+            let loadedAsDownload: DownloadStart | undefined;
+            const tabsBefore = new Set(tabs.map((tab) => tab.id));
 
             let outcome: PerformOutcome | ExtractOutcome;
             // A final is asked whether its page states the whole answer (see
@@ -12327,8 +12382,14 @@ export async function runAgent<T = unknown>(
                     : await page.extract(readSchema, action.instruction, framing, extractBound(), extractSelection(action.instruction));
                 break;
               case 'openTab': {
-                const opened = await page.openTab(action.url);
-                pending.tab = opened;
+                try {
+                  const opened = await page.openTab(action.url);
+                  pending.tab = opened;
+                } catch (error) {
+                  // Begun in the tab this action opened, which did not exist before it.
+                  loadedAsDownload = await downloadInstead(error, deps.downloads, downloadsBefore, (tab) => !tabsBefore.has(tab), clock);
+                  if (loadedAsDownload === undefined) throw error;
+                }
                 outcome = {};
                 break;
               }
@@ -12487,15 +12548,29 @@ export async function runAgent<T = unknown>(
               case 'wait':
                 outcome = await performWait(page, action);
                 break;
-              case 'navigate':
-                // What the caps have left: the host may wait on a cold site
-                // before its one retry, and never past the run's ceilings.
-                outcome = await page.perform(
-                  action,
-                  undefined,
-                  Math.max(0, Math.min(ledger.durationMs - ledger.elapsedMs(), ledger.budgetRemainingMs())),
-                );
+              case 'navigate': {
+                const actedIn = pending.tab;
+                try {
+                  // What the caps have left: the host may wait on a cold site
+                  // before its one retry, and never past the run's ceilings.
+                  outcome = await page.perform(
+                    action,
+                    undefined,
+                    Math.max(0, Math.min(ledger.durationMs - ledger.elapsedMs(), ledger.budgetRemainingMs())),
+                  );
+                } catch (error) {
+                  loadedAsDownload = await downloadInstead(
+                    error,
+                    deps.downloads,
+                    downloadsBefore,
+                    (tab) => actedIn === undefined || tab === actedIn || !tabsBefore.has(tab),
+                    clock,
+                  );
+                  if (loadedAsDownload === undefined) throw error;
+                  outcome = {};
+                }
                 break;
+              }
               default:
                 outcome = await page.perform(heldFileAction(action, fileManifest));
                 break;
@@ -12778,18 +12853,23 @@ export async function runAgent<T = unknown>(
                 'url' in outcome && typeof outcome.url === 'string'
                   ? checkReportedUrl(expectation, outcome.url)
                   : undefined;
-              const seen = await checkAction(
-                expectation,
-                async () => {
-                  const after = await page.snapshotAfterAction();
-                  return req.filter === false ? after : filterTree(after, req.filter ?? {});
-                },
-                clock,
-                undefined,
-                (ref, written) => page.holds(ref, written),
-              );
+              // A load the browser turned into a download is judged by the
+              // download, not by a page it never meant to show: no read.
+              const seen =
+                loadedAsDownload !== undefined
+                  ? downloadCheck({ expected: describeExpectation(expectation), reads: 0, elapsedMs: 0 }, loadedAsDownload)
+                  : await checkAction(
+                      expectation,
+                      async () => {
+                        const after = await page.snapshotAfterAction();
+                        return req.filter === false ? after : filterTree(after, req.filter ?? {});
+                      },
+                      clock,
+                      undefined,
+                      (ref, written) => page.holds(ref, written),
+                    );
               pending.check =
-                seen.reads > 0 || reported === undefined
+                seen.reads > 0 || reported === undefined || loadedAsDownload !== undefined
                   ? seen
                   : {
                       ...reported,
@@ -12901,28 +12981,27 @@ export async function runAgent<T = unknown>(
                       (actedIn === undefined || download.tab === actedIn || !openBefore.has(download.tab)),
                   );
                 let begun = begunHere();
-                const href = hasRef(action) ? findNode(resolvedIn, action.ref)?.href : undefined;
-                if (begun === undefined && href !== undefined && fetchesDocument(href, resolvedIn.url)) {
+                // The documents this step's program fetched: a navigate's own
+                // address, or the link of the head or of any element of its
+                // motor program that was dispatched (a chained click on a
+                // file link begins a download just as a head click does).
+                const dispatched: Action[] = [action];
+                for (const element of chain.slice(0, pending.reflex?.chained ?? 0)) {
+                  const valid = validateAction(element, tree);
+                  if (valid.ok) dispatched.push(valid.value);
+                }
+                const fetches = dispatched.some((done) => {
+                  const href = done.type === 'navigate' ? done.url : hasRef(done) ? findNode(resolvedIn, done.ref)?.href : undefined;
+                  return href !== undefined && fetchesDocument(href, resolvedIn.url);
+                });
+                if (begun === undefined && fetches) {
                   const waitUntil = clock.now() + DOWNLOAD_BEGIN_WAIT_MS;
                   while (begun === undefined && clock.now() < waitUntil) {
                     await clock.sleep(DOWNLOAD_BEGIN_POLL_MS);
                     begun = begunHere();
                   }
                 }
-                if (begun !== undefined) {
-                  pending.check = {
-                    ...pending.check,
-                    verdict: 'confirmed',
-                    saw: downloadSaw(begun),
-                    download: {
-                      filename: begun.filename,
-                      url:
-                        begun.url.length > MAX_DOWNLOAD_URL_CHARS
-                          ? `${begun.url.slice(0, MAX_DOWNLOAD_URL_CHARS)}…`
-                          : begun.url,
-                    },
-                  };
-                }
+                if (begun !== undefined) pending.check = downloadCheck(pending.check, begun);
               }
               /**
                * A SUBMIT THE BROWSER REFUSED, and why, from the browser's own
