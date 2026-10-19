@@ -150,7 +150,7 @@ distance into six steps, jittered each by 20%, and slept a hand-picked
 exists to replace. The harness did not capture wheel events, so nothing had
 ever checked them.
 
-Measured output: 12 wheel events to travel 2800px, at ~170ms apart, with
+Measured output: 12 wheel events to travel 2800px, ~170ms apart, with
 `deltaY` values of 225.15, 288.24, 111.17 … and `wheelDeltaY` pinned at **-120
 for every single one**.
 
