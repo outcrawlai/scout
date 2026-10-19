@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { Clock } from '@outcrawl/scout-core';
-import { CODE_RUN_TOOL, CODE_RUN_TOOL_DESCRIPTION, PAGE_SCRIPT_REPLY_MAX_CHARS, PAGE_SCRIPT_TOOL, PAGE_SCRIPT_TOOL_DESCRIPTION, codeRunToolPort, codeRunTools, hashSnapshot, nodeRef, pageScriptTools, renderPrompt, type AgentPrompt, type AxNode, type AxTree, type StepTrace, type ToolCallEcho } from '@outcrawl/runtime';
+import { CODE_RUN_TOOL, CODE_RUN_TOOL_DESCRIPTION, INBOX_SIGNUP_RULE, PAGE_SCRIPT_REPLY_MAX_CHARS, PAGE_SCRIPT_TOOL, PAGE_SCRIPT_TOOL_DESCRIPTION, codeRunToolPort, codeRunTools, hashSnapshot, nodeRef, pageScriptTools, renderPrompt, type AgentPrompt, type AxNode, type AxTree, type StepTrace, type ToolCallEcho } from '@outcrawl/runtime';
 
 import { BRAIN_BUDGET, BRAIN_SCHEMA, BRAIN_SYSTEM_PROMPT, BrainThread, actionKey, repeatedActions, retryableNavigations, alreadyRead, reloadAsNavigate, briefElements, briefFacts, rankedReadGap, rawBrief, readBrief, readDecision, reconciledNavigate, redirectedSite, searchedBefore, selectBrief as selectBriefWithRefs, directAction, threadReply, unconfirmedSlot, wholeRead, wrongListItem, readWithConditions, comboboxMiss, factsBesideReads, listingVerdicts, toolReplies } from '../src/brain';
 import { HarnessModelPort, type ModelPlan } from '../src/harness';
@@ -2389,6 +2389,29 @@ describe('the brain stays inside its budgets', () => {
     expect(thread.once()).toContain(text);
     expect(turn).toContain('characters were shown once, in the turn this arrived');
     expect(turn).not.toContain('ask for fewer results');
+  });
+
+  test('a service that makes inboxes lifts the login rule in the header; a person\'s own mailbox does not', () => {
+    const inbox = [{ name: 'postbox.create_inbox', description: 'Create an inbox.' }];
+    // A person's own mailbox can read mail but not make an inbox: no override.
+    const gmail = [{ name: 'gmail.search_messages', description: 'Search the mailbox.' }];
+    const header = new BrainThread().step({ ...promptFor(TREE, 'find it', 0), tools: inbox, connectors: [{ name: 'postbox' }] });
+    // It lifts the system prompt's login rule for this run only; that rule itself is unchanged for every run.
+    expect(header).toContain(`overrides "sign in only with credentials it gives, else fail"): ${INBOX_SIGNUP_RULE.trimEnd()}`);
+    expect(BRAIN_SYSTEM_PROMPT).toContain("on the task's site, sign in only with credentials it gives, else fail saying so.");
+    expect(new BrainThread().step({ ...promptFor(TREE, 'find it', 0), tools: gmail, connectors: [{ name: 'gmail' }] })).not.toContain('overrides');
+  });
+
+  test('a tool withdrawn mid-run is named as gone once, on the first step that lacks it', () => {
+    const thread = new BrainThread();
+    const ask = { name: 'web.ask', description: 'Ask the web.' };
+    const search = { name: 'web.search', description: 'Search the web.' };
+    thread.commit(0, thread.step({ ...promptFor(TREE, 'find it', 0), tools: [search, ask] }), '{"do":"act"}', 'line');
+    expect(thread.step({ ...promptFor(TREE, 'find it', 1), tools: [search, ask] })).not.toContain('No longer offered');
+    const gone = thread.step({ ...promptFor(TREE, 'find it', 1), tools: [search] });
+    expect(gone).toContain('No longer offered to this run (a call is refused): web.ask.');
+    thread.commit(1, gone, '{"do":"act"}', 'line');
+    expect(thread.step({ ...promptFor(TREE, 'find it', 2), tools: [search] })).not.toContain('No longer offered');
   });
 
   test("a web.ask reply that does not fit the turn keeps its answer's start and is never sent back to be asked again", () => {

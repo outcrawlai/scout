@@ -68,6 +68,8 @@ import {
   ASK_RULE,
   askWantRule,
   CODE_RUN_TOOL,
+  INBOX_SIGNUP_RULE,
+  offersInbox,
   describeAction,
   humanDuration,
   isReloadKey,
@@ -3678,13 +3680,22 @@ export class BrainThread {
   /** The newest memory/tool step the brain has been shown, per block. */
   #seen: Seen = { findings: -1, ruledOut: -1, extracted: -1, toolResults: -1, goals: '' };
   /** What the last step text would mark as shown, applied only once its exchange is committed. */
-  #pending: { readonly seen: Seen; readonly header: string; readonly secrets: string } | undefined;
+  #pending:
+    | { readonly seen: Seen; readonly header: string; readonly secrets: string; readonly tools: readonly string[] }
+    | undefined;
   /**
    * The secret grammar and ask lines the thread has shown, as one string: in
    * the header from the first step, and again whenever they change (a run
    * secret added mid-run, a card that arrived for an ask).
    */
   #secrets = '';
+  /**
+   * The tool names the thread has shown: listed in the header, and a tool the
+   * run withdraws later (`ToolPort.withdrawn`: `web.ask` once a connected
+   * service has answered) is named as gone on the step that first lacks it,
+   * because the header that listed it stays in the cached first turn.
+   */
+  #offered: readonly string[] = [];
   /** The task's condition checklist, from the brain's first reply. */
   #need: readonly string[] = [];
 
@@ -3772,7 +3783,8 @@ export class BrainThread {
     this.observe(prompt);
     const news = newsSince(prompt, this.#seen, fullReads, this.#tools);
     const secrets = secretLines(prompt).join('\n');
-    this.#pending = { seen: news.seen, header, secrets };
+    const offered = (prompt.tools ?? []).map((tool) => tool.name);
+    this.#pending = { seen: news.seen, header, secrets, tools: offered };
     this.#once = news.once;
     // Outside the capped state block: the line is the run's own grammar, and
     // cut it would offer a placeholder without its fields.
@@ -3780,6 +3792,10 @@ export class BrainThread {
       this.#header !== undefined && secrets !== this.#secrets
         ? [`The run's secrets changed. Now:${secrets === '' ? ' none.' : `\n${secrets}`}`]
         : [];
+    const gone = this.#header === undefined ? [] : this.#offered.filter((name) => !offered.includes(name));
+    if (gone.length > 0) {
+      changed.push(`No longer offered to this run (a call is refused): ${gone.join(', ')}.`);
+    }
     // Each line is clipped above; the block cap is a backstop that keeps the line breaks.
     const stateText = state.join('\n');
     const capped = stateText.length <= BRAIN_BUDGET.step ? stateText : `${stateText.slice(0, BRAIN_BUDGET.step - 1)}…`;
@@ -3798,6 +3814,7 @@ export class BrainThread {
       this.#seen = this.#pending.seen;
       this.#header = this.#pending.header;
       this.#secrets = this.#pending.secrets;
+      this.#offered = this.#pending.tools;
       this.#pending = undefined;
     }
     const shown = this.#seen.toolResults;
@@ -4057,6 +4074,13 @@ function runHeader(prompt: AgentPrompt): string {
   }
   if ((prompt.tools ?? []).some((tool) => tool.name.startsWith('web.'))) {
     lines.push(WEB_TOOLS_RULE);
+  }
+  // The loop's account-wall sentence, for a run granted a service that
+  // can make a throwaway inbox (never a person's own mailbox): the brain decides, and never reads the hands' tool rule.
+  // It names the system prompt's "Login or paywall" rule it overrides, so that
+  // rule stays byte for byte, and cached, on every run without an inbox.
+  if (offersInbox(prompt.tools ?? [], prompt.connectors ?? [])) {
+    lines.push(`Login wall, this run only (overrides "sign in only with credentials it gives, else fail"): ${INBOX_SIGNUP_RULE.trimEnd()}`);
   }
   // The loop's own per-run grammar, word for word, for what this run holds:
   // nothing for a run without it. Sits with the task in the cached first

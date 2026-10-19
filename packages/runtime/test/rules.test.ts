@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { compileRules } from '@outcrawl/scout-core';
 
 import type { Action } from '../src/actions';
-import type { ModelChoice } from '../src/loop';
+import type { ModelChoice, ToolPort } from '../src/loop';
 import { renderPrompt, runAgent } from '../src/loop';
 import { RuleBlockedError, checkRules, renderRules } from '../src/rules';
 import type { AxTree } from '../src/snapshot';
@@ -500,5 +500,73 @@ describe('an email address nobody gave the run is never typed into a page', () =
 
     expect(h.performed).toEqual([]);
     expect(result.steps[0]?.error).toContain('neither the task nor the page gave you');
+  });
+
+  /**
+   * OC-370, BU Bench task 80: a store's sign-in wall in front of the search.
+   * A connected inbox's reply carries the address the run may sign up with.
+   */
+  const wall = tree(
+    node({
+      role: 'RootWebArea',
+      name: 'Sign in / Register',
+      children: [node({ role: 'textbox', name: 'Email or phone number' }), node({ role: 'button', name: 'Continue' })],
+    }),
+    'https://shop.test/login.html',
+  );
+  const typeInto = (text: string): Action => ({ type: 'fill', ref: refOf(wall, 'Email or phone number'), text });
+  const searchTask = 'Search the store for wireless earbuds and report the price of the first result.';
+  /** A port whose tools answer the given replies; `connectors` names the services among them. */
+  const servicePort = (replies: Readonly<Record<string, string>>, connectors: readonly string[]): ToolPort => ({
+    list: () => Object.keys(replies).map((name) => ({ name, description: name })),
+    connectors: () => connectors.map((name) => ({ name })),
+    call: (tool) => ({ isError: false, text: replies[tool] ?? '' }),
+  });
+  const MAIL = {
+    'mail.create_inbox': 'Created inbox {"inbox_id":"Scout-7@agentmail.to"}',
+    'mail.list_messages': '{"messages":[{"from":"Shop <code@shop.test>","to":["scout-7@agentmail.to"],"preview":"or write to help@vendor.io"}]}',
+  };
+  const call = (tool: string): ModelChoice => ({ action: { type: 'callTool', tool, arguments: {} } });
+
+  test('the run\u2019s own inbox is typed only after the service made it, and no other address is', async () => {
+    const mine = typeInto('scout-7@agentmail.to');
+    const h = harness({
+      tree: wall,
+      model: script({ action: mine }, call('mail.create_inbox'), { action: mine }, { action: typeInto('someone.else@agentmail.to') }),
+    });
+
+    const result = await runAgent({ ...h.deps, tools: servicePort(MAIL, ['mail']) }, { task: searchTask, caps: CAPS, stepFailures: 3 });
+
+    expect(h.performed).toEqual([mine]);
+    expect(result.steps[0]?.error).toContain('"scout-7@agentmail.to" is an email address that neither the task nor the page gave you');
+    expect(result.steps[2]?.error).toBeUndefined();
+    expect(result.steps[3]?.error).toContain('"someone.else@agentmail.to" is an email address that neither');
+  });
+
+  test('a sender or an address in a message is not the run\u2019s own inbox: still refused', async () => {
+    for (const address of ['code@shop.test', 'help@vendor.io']) {
+      const h = harness({ tree: wall, model: script(call('mail.create_inbox'), call('mail.list_messages'), { action: typeInto(address) }) });
+
+      const result = await runAgent({ ...h.deps, tools: servicePort(MAIL, ['mail']) }, { task: searchTask, caps: CAPS, stepFailures: 3 });
+
+      expect(h.performed).toEqual([]);
+      expect(result.steps[2]?.error).toContain(`"${address}" is an email address that neither`);
+    }
+  });
+
+  test('a mailbox that cannot make an inbox gives no address, and a built-in tool\u2019s reply never does', async () => {
+    // A person's own Gmail, and a connector a customer named `web` beside the built-in web.read.
+    const cases = [
+      { replies: { 'gmail.search_messages': 'From: jane@customer.com' }, connectors: ['gmail'], tool: 'gmail.search_messages', address: 'jane@customer.com' },
+      { replies: { 'web.create_inbox': 'x@agentmail.to', 'web.read': 'Contact scout-9@agentmail.to' }, connectors: ['web'], tool: 'web.read', address: 'scout-9@agentmail.to' },
+    ];
+    for (const { replies, connectors, tool, address } of cases) {
+      const h = harness({ tree: wall, model: script(call(tool), { action: typeInto(address) }) });
+
+      const result = await runAgent({ ...h.deps, tools: servicePort(replies, connectors) }, { task: searchTask, caps: CAPS, stepFailures: 3 });
+
+      expect(h.performed).toEqual([]);
+      expect(result.steps[1]?.error).toContain(`"${address}" is an email address that neither`);
+    }
   });
 });

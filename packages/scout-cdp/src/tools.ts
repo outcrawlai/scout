@@ -63,6 +63,10 @@ export function composeToolPorts(
     async connectors(): Promise<readonly ExposedConnector[]> {
       return (await resolve()).services;
     },
+    // Every port's, asked per step and never cached: a port withdraws mid-run.
+    withdrawn(): readonly string[] {
+      return active.flatMap((port) => port.withdrawn?.() ?? []);
+    },
     async call(tool, args): Promise<ToolCallOutcome> {
       const { routes } = await resolve();
       const port = routes.get(tool);

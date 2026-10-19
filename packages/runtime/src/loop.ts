@@ -870,6 +870,14 @@ export interface ToolPort {
    * renders exactly the prompt it rendered before this existed.
    */
   connectors?(): MaybePromise<readonly ExposedConnector[]>;
+  /**
+   * Names from {@link list} this run may no longer call, asked on every step:
+   * the catalogue is read once, and a tool a port withdraws mid-run
+   * (`web.ask` once a connected service has answered, OC-370) leaves the
+   * prompt from the next step on. The port still answers a call to it, with
+   * why it is off. Absent: nothing is ever withdrawn.
+   */
+  withdrawn?(): readonly string[];
   call(
     tool: string,
     args: Readonly<Record<string, unknown>> | undefined,
@@ -3644,13 +3652,73 @@ const CONNECTOR_RULE =
   'only that service holds, is answered by calling that service\'s tools, not by looking for the ' +
   'service in the browser. ';
 
+/**
+ * A tool, by its own name past the service's, that MAKES an inbox:
+ * `create_inbox`, `new-inbox`. Only a throwaway-inbox service has one; a
+ * person's own mailbox (Gmail's `search_messages`), a CRM's contact lookups
+ * and a send-only service do not, and must never be offered as the address a
+ * site account is made with (security review, 2026-10-19). Judged from the
+ * tools, never from what the service is called.
+ */
+const INBOX_MAKER = /^(?:create|new)[_-]?inbox$/i;
+
+/**
+ * Such a service's tools whose reply names the run's OWN inboxes: the one it
+ * made, and the ones it lists. A message's sender or body is not among them.
+ */
+const OWN_INBOX_TOOL = /^(?:create|new|list|get)[_-]?inbox(?:es)?$/i;
+
+/**
+ * "AN ACCOUNT WALL IS NOT THE END OF THE TASK", for a run granted a service
+ * that can make a throwaway inbox ({@link offersInbox}; OC-370). BU Bench task 80, 2026-10-19: two runs
+ * granted an inbox (`run_250cb99b`, `run_cd117743`) met Temu's sign-in page
+ * and never called one of its tools; nothing said an inbox could make the
+ * account. The address it gives is one {@link inventedEmailRefusal} lets
+ * through. Rendered only beside such a service, and in the brain's header
+ * (`model/src/brain.ts`) as well as here, because the brain decides.
+ */
+export const INBOX_SIGNUP_RULE =
+  'If a site will not let the task go on without an account, make one with the connected inbox: sign up ' +
+  'with an address its tools give you and read the code or link the site sends there. Never pay, and ' +
+  'never give a real person\u2019s name or details. ';
+
+/** The connectors this run names that can make an inbox (see {@link INBOX_MAKER}). */
+function inboxServices(tools: readonly ExposedTool[], connectors: readonly ExposedConnector[]): ExposedConnector[] {
+  return connectors.filter((connector) =>
+    tools.some((tool) => tool.name.startsWith(`${connector.name}.`) && INBOX_MAKER.test(tool.name.slice(connector.name.length + 1))),
+  );
+}
+
+/** Whether a service this run names can make an inbox, judged by its tools' names (see {@link INBOX_MAKER}). */
+export function offersInbox(tools: readonly ExposedTool[], connectors: readonly ExposedConnector[]): boolean {
+  return inboxServices(tools, connectors).length > 0;
+}
+
+/**
+ * The exact catalogue names whose reply names the run's own inboxes: an
+ * {@link OWN_INBOX_TOOL} of a service that can make one. By name in the
+ * catalogue, so no built-in tool (`web.read`, `page.look`, ...) is among
+ * them whatever a customer names a connector.
+ */
+export function ownInboxTools(tools: readonly ExposedTool[], connectors: readonly ExposedConnector[]): ReadonlySet<string> {
+  return new Set(
+    inboxServices(tools, connectors).flatMap((connector) =>
+      tools
+        .filter((tool) => tool.name.startsWith(`${connector.name}.`) && OWN_INBOX_TOOL.test(tool.name.slice(connector.name.length + 1)))
+        .map((tool) => tool.name),
+    ),
+  );
+}
+
 /** The tool rule for this catalogue: connector or server framing, the refusal, then only the built-ins it lists. */
-function toolRule(tools: readonly ExposedTool[], hasConnectors: boolean): string {
+function toolRule(tools: readonly ExposedTool[], connectors: readonly ExposedConnector[]): string {
   const builtins =
     (tools.some((tool) => tool.name.startsWith(WEB_TOOL_PREFIX)) ? WEB_TOOL_RULE : '') +
     (tools.some((tool) => tool.name === LOOK_TOOL) ? LOOK_TOOL_RULE : '') +
     (tools.some((tool) => tool.name === SITE_CHECK_TOOL) ? SITE_CHECK_RULE : '');
-  return (TOOL_RULE_HEAD + (hasConnectors ? CONNECTOR_RULE : SERVER_TOOL_RULE) + LISTED_ONLY_RULE + builtins).trimEnd();
+  const services =
+    connectors.length === 0 ? SERVER_TOOL_RULE : CONNECTOR_RULE + (offersInbox(tools, connectors) ? INBOX_SIGNUP_RULE : '');
+  return (TOOL_RULE_HEAD + services + LISTED_ONLY_RULE + builtins).trimEnd();
 }
 
 /**
@@ -4291,8 +4359,12 @@ const RESERVED_EMAIL_DOMAIN = /@(?:[a-z0-9-]+\.)*(?:example\.(?:com|net|org)|[a-
  * never needed it.
  *
  * Let through when the address is one the run was GIVEN — in the task, on the
- * page being typed into (a search for an address the page shows), or in a
- * recorded finding — or when the task permits made-up data: it speaks of
+ * page being typed into (a search for an address the page shows), in a
+ * recorded finding, or one of the run's OWN inboxes (`fromServices`: an
+ * address a throwaway-inbox service's `create_inbox` or `list_inboxes`
+ * returned this run, see {@link ownInboxTools}, so a site that will not go on
+ * without an account can be signed up to with a mailbox the run reads;
+ * OC-370) — or when the task permits made-up data: it speaks of
  * email at all ("sign up with a test email"), or asks for dummy, fake,
  * sample, placeholder, random or made-up values or for test data ("fill the
  * form with dummy values").
@@ -4329,6 +4401,7 @@ export function inventedEmailRefusal(
   task: string,
   page: AxTree,
   findings: readonly Finding[],
+  fromServices: ReadonlySet<string>,
 ): string | undefined {
   if (action.type !== 'fill') return undefined;
   const typed = action.text.match(EMAIL_ADDRESS);
@@ -4340,7 +4413,7 @@ export function inventedEmailRefusal(
   ]
     .join('\n')
     .toLowerCase();
-  const invented = typed.find((address) => !given.includes(address.toLowerCase()));
+  const invented = typed.find((address) => !given.includes(address.toLowerCase()) && !fromServices.has(address.toLowerCase()));
   if (invented === undefined) return undefined;
   if (TASK_FILLS_A_FORM.test(task)) {
     if (typed.every((address) => RESERVED_EMAIL_DOMAIN.test(address))) return undefined;
@@ -6970,7 +7043,7 @@ export function renderPrompt(prompt: Omit<AgentPrompt, 'text'>): string {
     lines.push(ASK_RULE);
   }
   if (hasTools) {
-    lines.push(toolRule(tools, hasConnectors));
+    lines.push(toolRule(tools, connectors));
   }
   if (hasFiles) {
     lines.push(FILE_RULE);
@@ -8934,6 +9007,18 @@ export async function runAgent<T = unknown>(
     toolCatalogue.length === 0 || deps.tools?.connectors === undefined
       ? []
       : await deps.tools.connectors();
+  /**
+   * The run's OWN inbox addresses, lowercased: every address in a successful
+   * reply of an {@link ownInboxTools} tool (a throwaway-inbox service's
+   * `create_inbox` or `list_inboxes`). What {@link inventedEmailRefusal}
+   * counts as given beside the task, the page and the findings, so the inbox
+   * the run made can be typed into a site's sign-up. Never a message's sender
+   * or body, a person's mailbox or a built-in tool's reply: those are
+   * somebody's (security review, 2026-10-19). Run-local, like
+   * {@link toolEchoes}.
+   */
+  const serviceAddresses = new Set<string>();
+  const inboxReplies = ownInboxTools(toolCatalogue, connectorCatalogue);
 
   /**
    * The files this run holds, read at the start and again on every step.
@@ -11489,6 +11574,8 @@ export async function runAgent<T = unknown>(
              */
             const promptFor = (tree: AxTree, hash: string, moved?: string): AgentPrompt => {
               const said = [...notices, ...(moved === undefined ? [] : [movedNotice(moved)])];
+              const withdrawn = deps.tools?.withdrawn?.() ?? [];
+              const offered = withdrawn.length === 0 ? toolCatalogue : toolCatalogue.filter((tool) => !withdrawn.includes(tool.name));
               const base: Omit<AgentPrompt, 'text'> = {
                 task: req.task,
                 today,
@@ -11501,7 +11588,7 @@ export async function runAgent<T = unknown>(
                 ...(goals.length > 0 || findings.length > 0 || ruledOut.length > 0 ? { memory } : {}),
                 ...(extractedMemory.length > 0 ? { extracted: [...extractedMemory] } : {}),
                 ...(deps.tabs !== undefined ? { tabs } : {}),
-                ...(toolCatalogue.length > 0 ? { tools: toolCatalogue } : {}),
+                ...(offered.length > 0 ? { tools: offered } : {}),
                 ...(connectorCatalogue.length > 0 ? { connectors: connectorCatalogue } : {}),
                 ...(toolEchoes.length > 0 ? { toolResults: [...toolEchoes] } : {}),
                 // The run's files, absent for the runs that have none — which
@@ -12067,7 +12154,7 @@ export async function runAgent<T = unknown>(
             // Same place and same recovery as a rule: thrown before the mark
             // and the dispatch, read back on the next prompt, bounded by
             // `stepFailures`. See `inventedEmailRefusal`.
-            const invented = inventedEmailRefusal(action, req.task, resolvedIn, findings);
+            const invented = inventedEmailRefusal(action, req.task, resolvedIn, findings, serviceAddresses);
             if (invented !== undefined) {
               throw new Error(invented);
             }
@@ -12265,6 +12352,11 @@ export async function runAgent<T = unknown>(
                */
               case 'callTool': {
                 const result = await page.callTool(action.tool, action.arguments);
+                if (inboxReplies.has(action.tool) && !result.isError) {
+                  for (const address of result.text.match(EMAIL_ADDRESS) ?? []) {
+                    serviceAddresses.add(address.toLowerCase());
+                  }
+                }
                 // Only the site-check port's word counts: a connector's reply
                 // is somebody else's, and may claim anything.
                 const standing = action.tool === SITE_CHECK_TOOL && result.isError ? result.standingCheck : undefined;
@@ -12578,7 +12670,7 @@ export async function runAgent<T = unknown>(
                   abortReason = `a customer rule refuses this action (${refused.rule}): ${refused.evidence}`;
                   break;
                 }
-                const invented = inventedEmailRefusal(candidate.value, req.task, now, findings);
+                const invented = inventedEmailRefusal(candidate.value, req.task, now, findings, serviceAddresses);
                 if (invented !== undefined) {
                   abortedAfter = chained;
                   abortReason = invented;
