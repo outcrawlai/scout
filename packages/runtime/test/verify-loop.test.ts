@@ -755,3 +755,71 @@ describe('a navigate the browser turned into a download took effect', () => {
     expect(result.stopReason).toBe('error');
   });
 });
+
+describe('any step that began a download says the file is being saved', () => {
+  // The shape of run_ab036fe8 (the fleet, browser .59, 2026-10-19 22:22Z): an
+  // `openTab` on a file URL left a blank tab and reported a plain success,
+  // while the host stored the file.
+  const ORIGIN = 'https://was1-vin.speedtest.network.ovh.net';
+  const FILE = `${ORIGIN}/files/1Mb.dat`;
+  const landing = tree(node({ role: 'RootWebArea', name: 'OVH speed test', children: [node({ role: 'button', name: 'Refresh', ref: BUTTON })] }), `${ORIGIN}/`);
+
+  function opening(options: { readonly first: Action; readonly downloads: boolean; readonly throws?: string }): { readonly h: Harness; readonly deps: AgentDeps } {
+    const begun: DownloadStart[] = [];
+    const h: Harness = harness({
+      model: (_prompt, step) => ({ action: step === 0 ? options.first : DONE }),
+      tabs: [{ id: 't0', url: landing.url }],
+      tabTree: () => landing,
+      perform: (action) => {
+        if (action.type === 'click' && options.downloads) begun.push({ id: 'guid-click', tab: 't0', url: FILE, filename: '1Mb.dat', saved: true });
+        if (options.throws !== undefined) throw new Error(options.throws);
+      },
+    });
+    const tabs = h.deps.tabs;
+    if (tabs === undefined) throw new Error('the harness binds tabs');
+    const deps: AgentDeps = {
+      ...h.deps,
+      tabs: {
+        ...tabs,
+        open: async (url: string) => {
+          const id = await tabs.open(url);
+          if (options.downloads) begun.push({ id: `guid-${id}`, tab: id, url, filename: '1Mb.dat', saved: true });
+          return id;
+        },
+      },
+      downloads: () => begun,
+    };
+    return { h, deps };
+  }
+  const run = async (deps: AgentDeps) =>
+    await runAgent(deps, { task: 'download the 1 MB test file', caps: CAPS, stepFailures: 1, settle: false, verify: true });
+
+  test('an openTab that began a download carries it into the history the model reads', async () => {
+    const { h, deps } = opening({ first: { type: 'openTab', url: FILE }, downloads: true });
+    const result = await run(deps);
+
+    expect(result.steps[0]?.error).toBeUndefined();
+    expect(result.steps[0]?.check?.verdict).toBe('confirmed');
+    expect(result.steps[0]?.check?.saw).toContain('download of "1Mb.dat"');
+    expect(result.steps[0]?.check?.saw).toContain('being saved for the person who started this run');
+    expect(result.steps[0]?.check?.download).toEqual({ filename: '1Mb.dat', url: FILE });
+    expect(h.prompts[1]?.text).toContain('being saved for the person who started this run');
+  });
+
+  test('an openTab that began none carries nothing', async () => {
+    const { h, deps } = opening({ first: { type: 'openTab', url: FILE }, downloads: false });
+    const result = await run(deps);
+
+    expect(result.steps[0]?.check).toBeUndefined();
+    expect(h.prompts[1]?.text).not.toContain('being saved');
+  });
+
+  test('a step that threw and still began a download says both', async () => {
+    const { deps } = opening({ first: CLICK, downloads: true, throws: 'click timed out' });
+    const result = await run(deps);
+
+    expect(result.steps[0]?.error).toContain('click timed out');
+    expect(result.steps[0]?.error).toContain('meanwhile it started a download of "1Mb.dat"');
+    expect(result.steps[0]?.error).toContain('being saved for the person who started this run');
+  });
+});

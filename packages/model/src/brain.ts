@@ -4044,6 +4044,18 @@ const WEB_TOOLS_RULE =
   'site: when the task needs a site to do something (run its own search or filters, compute a route or ' +
   'driving distance, show a price, availability or listing as it is now), do that part in the browser on that site.';
 
+/**
+ * What the brain is told, once, in the run header of a run whose downloads
+ * are kept (`AgentPrompt.downloadsKept`, the context's download sink is on).
+ * Fleet 2026-10-19 22:22Z, run_ab036fe8 (the fleet, n=1): two files were stored
+ * by the browser on the run's first two steps, and the brain, told nothing,
+ * fetched both again with code.run and answered that they were "saved in
+ * /work, not in the browser".
+ */
+const DOWNLOADS_KEPT_RULE =
+  'Files the browser downloads are kept for the person who started this run and listed with the run\u2019s downloads: ' +
+  'download a file by clicking its link or opening its URL in the browser, not with code.run, and name the files in the answer.';
+
 /** The run's constants: the first user turn's head. Cached with the thread from step two on. */
 function runHeader(prompt: AgentPrompt): string {
   const lines = [`TASK: ${prompt.task}`];
@@ -4093,6 +4105,9 @@ function runHeader(prompt: AgentPrompt): string {
   }
   if (prompt.purchases === true) {
     lines.push(`Purchases, each an act ("a" names no ref; never a callTool):\n  ${PURCHASE_GRAMMAR}`, PURCHASE_RULE);
+  }
+  if (prompt.downloadsKept === true) {
+    lines.push(DOWNLOADS_KEPT_RULE);
   }
   if (prompt.history.length > 0) {
     // Its findings, reads and plan follow as this first step's news: nothing

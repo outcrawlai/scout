@@ -684,6 +684,12 @@ export interface AgentPrompt {
    */
   readonly purchases?: true;
   /**
+   * Present when the host keeps every file this run's browser downloads for
+   * the person who started the run ({@link AgentDeps.downloadsKept}). Adds one
+   * line to the brain's run header; absent renders the prompt as before.
+   */
+  readonly downloadsKept?: true;
+  /**
    * What this run's model may ask a person for itself, beside its free-text
    * questions: `card` while the run holds no card, `details` while it holds
    * no billing profile. Present only for a run with a spend cap and a
@@ -1170,6 +1176,13 @@ export interface AgentDeps {
    * was before this existed.
    */
   readonly downloads?: () => readonly DownloadStart[];
+  /**
+   * Whether the host keeps every file this run's browser downloads for the
+   * person who started the run, listed with the run's downloads: true while
+   * the context's download sink is on. Absent or false: downloads stay in the
+   * browser, and the prompt says nothing about them.
+   */
+  readonly downloadsKept?: boolean;
   /**
    * The browser's own cumulative relayed-byte counter for this attempt
    * (`Outcrawl.getContextBytes`, both directions summed), for the BUDGET
@@ -6608,6 +6621,32 @@ function downloadCheck(base: { readonly expected: string; readonly reads: number
   };
 }
 
+/** What a step's download note is judged against: the ledger and the tabs as they were at dispatch. */
+interface StepDownloads {
+  readonly before: ReadonlySet<string>;
+  /** The tab the action was taken in. */
+  readonly actedIn: TabId | undefined;
+  readonly tabsBefore: ReadonlySet<TabId>;
+}
+
+/**
+ * The download this step began, if any: new since dispatch, and begun in the
+ * tab the action was taken in or in a tab the step opened. Whatever the
+ * action and whether or not it threw, a step that began one says so.
+ *
+ * Fleet 2026-10-19 22:22Z, run_ab036fe8 (the fleet, n=1): two `openTab` steps on
+ * two file URLs each began a download that the host stored, and each
+ * reported a plain success with a blank tab, so the brain re-fetched both
+ * files with code.run and told the customer they were on the sandbox's disk.
+ */
+function downloadNote(readDownloads: (() => readonly DownloadStart[]) | undefined, watch: StepDownloads | undefined): DownloadStart | undefined {
+  if (readDownloads === undefined || watch === undefined) return undefined;
+  return readDownloads().find(
+    (download) =>
+      !watch.before.has(download.id) && (watch.actedIn === undefined || download.tab === watch.actedIn || !watch.tabsBefore.has(download.tab)),
+  );
+}
+
 /**
  * What the model is told when its answer fills the schema and answers nothing.
  *
@@ -11241,6 +11280,13 @@ export async function runAgent<T = unknown>(
      * never of a chained element or of the read after it.
      */
     let headInFlight: RefusedMidSolve | undefined;
+    /**
+     * What the browser's download ledger held, and which tabs existed, when
+     * this step's action was dispatched; `undefined` before dispatch and on a
+     * host that cannot see downloads. Read after the action, even one that
+     * threw, by {@link downloadNote}.
+     */
+    let stepDownloads: StepDownloads | undefined;
     /** The url the previous step left the page on, where a solve's submit departs from. */
     const departFrom = standingUrl;
     /** Folds what the session learned since the last drain into the two flags. */
@@ -11656,6 +11702,7 @@ export async function runAgent<T = unknown>(
                 ...(fileManifest.length > 0 ? { files: fileManifest } : {}),
                 ...(runFiles?.create !== undefined ? { canCreateFiles: true as const } : {}),
                 ...(req.purchases === undefined ? {} : { purchases: true as const }),
+                ...(deps.downloadsKept === true ? { downloadsKept: true as const } : {}),
                 ...(secretGrammar === undefined ? {} : { secretGrammar }),
                 // Absent for a run that cannot buy, reach a person, or already
                 // holds both a card and a billing profile.
@@ -12313,20 +12360,17 @@ export async function runAgent<T = unknown>(
                 )
               : { kind: 'none' };
             /**
-             * The downloads the browser had already begun, so the check below
-             * credits this action only with one it began. Read before the
-             * action, when there will be an effect to judge or the action
-             * loads a document, which the browser may turn into a download
-             * (see {@link downloadInstead}).
+             * The downloads the browser had already begun, so this step is
+             * credited only with one it began. Read before every action (a
+             * synchronous read of the host's ledger): any action may begin a
+             * download, and the step says so whatever it was
+             * ({@link downloadNote}).
              */
-            const loadsDocument = action.type === 'navigate' || action.type === 'openTab';
-            const downloadsBefore =
-              (expectation.kind === 'effect' || loadsDocument) && deps.downloads !== undefined
-                ? new Set(deps.downloads().map((download) => download.id))
-                : undefined;
+            const downloadsBefore = deps.downloads === undefined ? undefined : new Set(deps.downloads().map((download) => download.id));
             /** The download a `navigate` or `openTab` became instead of a page. */
             let loadedAsDownload: DownloadStart | undefined;
             const tabsBefore = new Set(tabs.map((tab) => tab.id));
+            stepDownloads = downloadsBefore === undefined ? undefined : { before: downloadsBefore, actedIn: pending.tab, tabsBefore };
 
             let outcome: PerformOutcome | ExtractOutcome;
             // A final is asked whether its page states the whole answer (see
@@ -13154,6 +13198,34 @@ export async function runAgent<T = unknown>(
               await page.focusTab(openedByAction);
               pending.tab = openedByAction;
             }
+            /**
+             * A STEP THAT BEGAN A DOWNLOAD SAYS SO, whatever its action and
+             * whatever its check made of the page (see {@link downloadNote}).
+             * An `openTab` whose tab is still blank is given the click's wait
+             * for the announcement: a file URL leaves its tab blank.
+             */
+            if (pending.check?.download === undefined && stepDownloads !== undefined) {
+              let begun = downloadNote(deps.downloads, stepDownloads);
+              if (begun === undefined && action.type === 'openTab' && /^https?:/i.test(action.url)) {
+                const opened = (await page.listTabs()).find((tab) => tab.id === pending.tab);
+                if (opened !== undefined && (opened.url === '' || opened.url === 'about:blank')) {
+                  const waitUntil = clock.now() + DOWNLOAD_BEGIN_WAIT_MS;
+                  while (begun === undefined && clock.now() < waitUntil) {
+                    await clock.sleep(DOWNLOAD_BEGIN_POLL_MS);
+                    begun = downloadNote(deps.downloads, stepDownloads);
+                  }
+                }
+              }
+              if (begun !== undefined) {
+                const check = pending.check;
+                pending.check =
+                  check === undefined
+                    ? downloadCheck({ expected: expectation.kind === 'none' ? describeAction(action) : describeExpectation(expectation), reads: 0, elapsedMs: 0 }, begun)
+                    : check.verdict === 'contradicted'
+                      ? downloadCheck(check, begun)
+                      : { ...downloadCheck(check, begun), verdict: check.verdict, saw: `${check.saw}; ${downloadSaw(begun)}` };
+              }
+            }
             return undefined;
           },
           // A finish or a give-up is the model's verdict on a page it has
@@ -13305,6 +13377,10 @@ export async function runAgent<T = unknown>(
         continue;
       }
       failure = error instanceof SolveInProgressError ? VERIFICATION_IN_PROGRESS : errorMessage(error);
+      // A step that failed and still began a download says so: the file is
+      // kept (or not) whatever the action reported. See `downloadNote`.
+      const begunMeanwhile = downloadNote(deps.downloads, stepDownloads);
+      if (begunMeanwhile !== undefined) failure = `${failure}; meanwhile ${downloadSaw(begunMeanwhile)}`;
       record(traceOf(pending, index, clock.now() - stepStarted, isoTime(wallClock.now()), failure));
       /**
        * CANCELLED WHILE THIS STEP WAS UNDER WAY. On the trace as the step it
