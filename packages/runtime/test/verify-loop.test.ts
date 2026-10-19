@@ -823,3 +823,129 @@ describe('any step that began a download says the file is being saved', () => {
     expect(result.steps[0]?.error).toContain('being saved for the person who started this run');
   });
 });
+
+describe('a document link that opens a popup window', () => {
+  // eTenders NI, fleet 2026-10-19 (browser .59): each document is `href="#"`
+  // whose onclick calls `window.open(url, 'About', 'width=600,…')`. The popup's
+  // "PROCEED WITHOUT ASSOCIATION" closes the popup, and the file then begins
+  // downloading in the opener tab (run_0a0b1897, run_91f0a4e3).
+  const LIST = 'https://etendersni.gov.uk/epps/cft/listContractDocuments.do?resourceId=6792531';
+  const popupFor = (doc: string): string => `https://etendersni.gov.uk/epps/cft/prepareAnonymousDownload.do?resourceId=6792531&documentId=${doc}`;
+  const DOC_A = nodeRef(0, 71);
+  const DOC_B = nodeRef(0, 72);
+  const PROCEED = nodeRef(0, 81);
+  const listing = (url: string): AxTree =>
+    tree(
+      node({
+        role: 'RootWebArea',
+        name: 'Contract documents',
+        children: [
+          node({ role: 'link', name: 'Declaration documents.zip', ref: DOC_A, href: `${LIST}#` }),
+          node({ role: 'link', name: 'Specification.docx', ref: DOC_B, href: `${LIST}#` }),
+        ],
+      }),
+      url,
+    );
+  const popup = (url: string): AxTree =>
+    tree(node({ role: 'RootWebArea', name: 'About', children: [node({ role: 'button', name: 'PROCEED WITHOUT ASSOCIATION', ref: PROCEED })] }), url);
+
+  /**
+   * The site, as the browser shows it: a listing in t0 and, once opened, the
+   * named popup 'About'. A click on a document opens the popup (or re-targets
+   * it when open) and leaves focus where it was, as the host does; a click on
+   * PROCEED closes the popup and the opener begins the file `lateMs` later.
+   */
+  function etenders(options: {
+    readonly model: (step: number) => Action;
+    readonly start?: { readonly hashed: boolean; readonly popupAt?: string; readonly focused?: 't0' | 't1' };
+    readonly lateMs?: number;
+  }): { readonly h: Harness; readonly deps: AgentDeps } {
+    let hashed = options.start?.hashed ?? false;
+    const urls = new Map<string, string>();
+    const begun: { readonly at: number; readonly download: DownloadStart }[] = [];
+    const startTabs = [{ id: 't0', url: hashed ? `${LIST}#` : LIST }];
+    if (options.start?.popupAt !== undefined) startTabs.push({ id: 't1', url: options.start.popupAt });
+    if (options.start?.focused === 't1') startTabs.reverse();
+    let control: AgentDeps['tabs'];
+    const h: Harness = harness({
+      model: (_prompt, step) => ({ action: options.model(step) }),
+      tabs: startTabs,
+      tabTree: (id) => (id === 't0' ? listing(hashed ? `${LIST}#` : LIST) : popup(urls.get(id) ?? popupFor('A'))),
+      perform: async (action) => {
+        if (action.type !== 'click' || control === undefined) return;
+        if (action.ref === PROCEED) {
+          await control.close('t1');
+          begun.push({ at: h.clock.now() + (options.lateMs ?? 1_500), download: { id: 'guid-1', tab: 't0', url: popupFor('A'), filename: 'Declaration documents.zip', saved: true } });
+          throw new Error("Outcrawl.lock was not answered: the frame or tab it was sent to went away first");
+        }
+        const target = popupFor(action.ref === DOC_A ? 'A' : 'B');
+        hashed = true;
+        const open = await control.list();
+        const named = open.find((tab) => tab.id !== 't0');
+        if (named !== undefined) {
+          urls.set(named.id, target);
+        } else {
+          const id = await control.open(target);
+          urls.set(id, target);
+          await control.focus('t0');
+        }
+      },
+    });
+    const tabs = h.deps.tabs;
+    if (tabs === undefined) throw new Error('the harness binds tabs');
+    for (const tab of startTabs) if (tab.id !== 't0') urls.set(tab.id, tab.url);
+    control = {
+      ...tabs,
+      list: async () => (await tabs.list()).map((tab) => ({ ...tab, url: urls.get(tab.id) ?? tab.url })),
+    };
+    const deps: AgentDeps = {
+      ...h.deps,
+      tabs: control,
+      downloads: () => begun.filter((entry) => entry.at <= h.clock.now()).map((entry) => entry.download),
+    };
+    return { h, deps };
+  }
+  const run = async (deps: AgentDeps) =>
+    await runAgent(deps, { task: 'download every tender document', caps: CAPS, stepFailures: 0, settle: false, verify: true });
+
+  test('a click that moves the page to # and opens a popup is reported as the new tab, focused', async () => {
+    const { deps } = etenders({ model: (step) => (step === 0 ? { type: 'click', ref: DOC_A } : DONE) });
+    const result = await run(deps);
+
+    expect(result.steps[0]?.check?.verdict).toBe('confirmed');
+    const opened = (await deps.tabs?.list())?.find((tab) => tab.id !== 't0');
+    expect(opened?.url).toBe(popupFor('A'));
+    expect(result.steps[0]?.check?.saw).toContain(`it opened a new tab, ${String(opened?.id)} on ${popupFor('A')}, which is focused`);
+    expect(result.steps[0]?.tab).toBe(opened?.id);
+  });
+
+  test('a click that re-targets the open popup is reported as that tab loading, not as nothing changed', async () => {
+    const { deps } = etenders({
+      start: { hashed: true, popupAt: popupFor('A') },
+      model: (step) => (step === 0 ? { type: 'click', ref: DOC_B } : DONE),
+    });
+    const result = await run(deps);
+
+    expect(result.steps[0]?.check?.verdict).toBe('confirmed');
+    expect(result.steps[0]?.check?.saw).toContain(`it loaded ${popupFor('B')} in tab t1`);
+    expect(result.steps[0]?.tab).toBe('t1');
+    expect(result.stopReason).toBe('task-complete');
+  });
+
+  test('a popup that closes itself on the click is not a failure: focus goes back and the opener\u2019s download is this step\u2019s', async () => {
+    const { deps } = etenders({
+      start: { hashed: true, popupAt: popupFor('A'), focused: 't1' },
+      model: (step) => (step === 0 ? { type: 'click', ref: PROCEED } : DONE),
+      lateMs: 6_000,
+    });
+    const result = await run(deps);
+
+    expect(result.steps[0]?.error).toBeUndefined();
+    expect(result.steps[0]?.check?.verdict).toBe('confirmed');
+    expect(result.steps[0]?.check?.saw).toContain('tab t1 closed after the action, and t0 is focused');
+    expect(result.steps[0]?.check?.saw).toContain('download of "Declaration documents.zip"');
+    expect(result.steps[0]?.check?.saw).toContain('being saved for the person who started this run');
+    expect(result.steps[0]?.tab).toBe('t0');
+    expect(result.stopReason).toBe('task-complete');
+  });
+});

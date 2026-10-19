@@ -6527,6 +6527,23 @@ const DOWNLOAD_BEGIN_POLL_MS = 100;
 const MAX_DOWNLOAD_URL_CHARS = 2_048;
 
 /**
+ * Whether a link to `href` names the page it is on (`#`, a fragment, the same
+ * address): such a link leads nowhere itself, and what its click opens is its
+ * script's choice.
+ */
+function sameDocument(href: string, pageUrl: string): boolean {
+  try {
+    const target = new URL(href, pageUrl);
+    const page = new URL(pageUrl);
+    target.hash = '';
+    page.hash = '';
+    return target.href === page.href;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether a click on a link to `href`, taken on `pageUrl`, fetches a document
  * whose response could turn out to be a download: http(s), and not a jump to
  * a fragment of the page it is already on.
@@ -6645,6 +6662,67 @@ function downloadNote(readDownloads: (() => readonly DownloadStart[]) | undefine
     (download) =>
       !watch.before.has(download.id) && (watch.actedIn === undefined || download.tab === watch.actedIn || !watch.tabsBefore.has(download.tab)),
   );
+}
+
+/**
+ * How long a step whose tab closed waits for a download to begin on any tab
+ * of the run. Measured on a /connect repro of eTenders NI (2026-10-19,
+ * browser .59, n not recorded by the measurer): the popup's "proceed" closes
+ * the popup and the opener begins the download 0.4-6 s later. The click's own
+ * wait ({@link DOWNLOAD_BEGIN_WAIT_MS}) is shorter than that.
+ */
+const CLOSED_TAB_DOWNLOAD_WAIT_MS = 8_000;
+
+/** A step whose tab closed: the tab focused instead, and the check the step carries. */
+interface ClosedTab {
+  readonly focus: TabId;
+  readonly check: CheckTrace;
+}
+
+/**
+ * The step's tab closed during it (a popup's own `window.close()` after the
+ * click), or `undefined` when it is still open.
+ *
+ * Not a failure: fleet 2026-10-19 (browser .59, n=1, run_91f0a4e3, eTenders
+ * NI) a click on a popup's "PROCEED WITHOUT ASSOCIATION" closed the popup and
+ * the step failed "Outcrawl.lock was not answered: the frame or tab it was sent
+ * to went away first", while the file then began downloading in the opener.
+ * Focus goes back to the tab that opened it (else the first tab left, since a
+ * host leaves focus on a dead tab), and any download that began on ANY tab of
+ * the run during the step, or within {@link CLOSED_TAB_DOWNLOAD_WAIT_MS}
+ * after, is this step's: the popup handed the file to its opener.
+ */
+async function closedTabOutcome(options: {
+  readonly control: TabControl | undefined;
+  readonly readDownloads: (() => readonly DownloadStart[]) | undefined;
+  readonly watch: StepDownloads | undefined;
+  readonly dispatchedIn: TabId | undefined;
+  readonly openerOf: ReadonlyMap<TabId, TabId>;
+  readonly expected: string;
+  readonly clock: Clock;
+}): Promise<ClosedTab | undefined> {
+  const { control, readDownloads, watch, dispatchedIn, clock } = options;
+  if (control === undefined || dispatchedIn === undefined) return undefined;
+  const live = await control.list();
+  if (live.some((tab) => tab.id === dispatchedIn)) return undefined;
+  const opener = options.openerOf.get(dispatchedIn);
+  const focus = opener !== undefined && live.some((tab) => tab.id === opener) ? opener : live[0]?.id;
+  if (focus === undefined) return undefined;
+  await control.focus(focus);
+  const begun = (): DownloadStart | undefined =>
+    readDownloads === undefined || watch === undefined ? undefined : readDownloads().find((download) => !watch.before.has(download.id));
+  let found = begun();
+  const waitUntil = clock.now() + CLOSED_TAB_DOWNLOAD_WAIT_MS;
+  while (found === undefined && readDownloads !== undefined && watch !== undefined && clock.now() < waitUntil) {
+    await clock.sleep(DOWNLOAD_BEGIN_POLL_MS);
+    found = begun();
+  }
+  const saw = `tab ${dispatchedIn} closed after the action, and ${focus} is focused for the next step`;
+  const base = { expected: options.expected, reads: 0, elapsedMs: 0 };
+  return {
+    focus,
+    check: found === undefined ? { ...base, verdict: 'confirmed', saw } : { ...downloadCheck(base, found), saw: `${saw}; ${downloadSaw(found)}` },
+  };
 }
 
 /**
@@ -9560,6 +9638,12 @@ export async function runAgent<T = unknown>(
    */
   let refusedMidSolve: RefusedMidSolve | undefined;
   /**
+   * The tab each tab the loop focused for a click was opened from, so a popup
+   * that closes itself hands focus back to the page that opened it
+   * ({@link closedTabOutcome}).
+   */
+  const openerOf = new Map<TabId, TabId>();
+  /**
    * THE HOST RE-SENDS AN ACTION THE PAGE GATE REFUSED MID-SOLVE, once, or
    * `undefined` for the model's step.
    *
@@ -11287,6 +11371,24 @@ export async function runAgent<T = unknown>(
      * threw, by {@link downloadNote}.
      */
     let stepDownloads: StepDownloads | undefined;
+    /**
+     * The tab this step's action was dispatched in, and the tabs that existed
+     * then; `undefined` until dispatch. A step whose tab is gone afterwards
+     * closed it ({@link closedTabOutcome}).
+     */
+    let dispatchedIn: { readonly tab: TabId; readonly urls: ReadonlyMap<TabId, string> } | undefined;
+    /** This step's tab closing, once found: see {@link closedTabOutcome}. Not memoized while the tab still lives. */
+    let tabClosed: ClosedTab | undefined;
+    const closedNow = async (): Promise<ClosedTab | undefined> =>
+      (tabClosed ??= await closedTabOutcome({
+        control: deps.tabs,
+        readDownloads: deps.downloads,
+        watch: stepDownloads,
+        dispatchedIn: dispatchedIn?.tab,
+        openerOf,
+        expected: describeAction(pending.action),
+        clock,
+      }).catch(() => undefined));
     /** The url the previous step left the page on, where a solve's submit departs from. */
     const departFrom = standingUrl;
     /** Folds what the session learned since the last drain into the two flags. */
@@ -12371,6 +12473,7 @@ export async function runAgent<T = unknown>(
             let loadedAsDownload: DownloadStart | undefined;
             const tabsBefore = new Set(tabs.map((tab) => tab.id));
             stepDownloads = downloadsBefore === undefined ? undefined : { before: downloadsBefore, actedIn: pending.tab, tabsBefore };
+            dispatchedIn = pending.tab === undefined ? undefined : { tab: pending.tab, urls: new Map(tabs.map((tab) => [tab.id, tab.url])) };
 
             let outcome: PerformOutcome | ExtractOutcome;
             // A final is asked whether its page states the whole answer (see
@@ -12957,11 +13060,33 @@ export async function runAgent<T = unknown>(
                * nothing. A click on a node with no `href` keeps the first
                * fresh tab: there is nothing to compare it with.
                */
-              if (pending.check.verdict === 'contradicted' && expectation.kind === 'effect' && deps.tabs !== undefined) {
+              /*
+               * ALSO WHEN THE CHECK CONFIRMED THE CLICK, and also a window the
+               * click re-targeted. Fleet 2026-10-19 (browser .59, n=1,
+               * run_0a0b1897, eTenders NI): a document link is `href="#"` whose
+               * onclick calls `window.open(url, 'About', 'width=600,…')`. The
+               * `#` moved the page's url, so the check confirmed "the page went
+               * to …#" and the popup was never looked for; every later click
+               * re-targeted the open window 'About' (no new tab) and was told
+               * "nothing on the page changed" four times, and the run stopped.
+               *
+               * A link whose own address is the page it is on (`#`, a
+               * fragment, `javascript:`) leads nowhere itself: its script
+               * chose the window, so the first fresh tab is the click's.
+               */
+              if ((pending.check.verdict === 'contradicted' || pending.check.verdict === 'confirmed') && expectation.kind === 'effect' && deps.tabs !== undefined) {
+                const contradictedHere = pending.check.verdict === 'contradicted';
+                const said = (text: string): string => (contradictedHere || pending.check === undefined ? text : `${pending.check.saw}; ${text}`);
                 const known = new Set(tabs.map((tab) => tab.id));
-                const href = hasRef(action) ? findNode(resolvedIn, action.ref)?.href : undefined;
+                const rawHref = hasRef(action) ? findNode(resolvedIn, action.ref)?.href : undefined;
+                const href =
+                  rawHref !== undefined && fetchesDocument(rawHref, resolvedIn.url) && !sameDocument(rawHref, resolvedIn.url)
+                    ? new URL(rawHref, resolvedIn.url).href
+                    : undefined;
                 const waitUntil = clock.now() + NEW_TAB_COMMIT_WAIT_MS;
-                let fresh = (await page.listTabs()).filter((tab) => !known.has(tab.id));
+                // A confirmed click on a link to another document went where the
+                // link points; only a script link's popup is its effect then.
+                let fresh = contradictedHere || href === undefined ? (await page.listTabs()).filter((tab) => !known.has(tab.id)) : [];
                 let bound = href === undefined ? fresh[0] : fresh.find((tab) => leadsTo(href, tab.url));
                 while (
                   bound === undefined &&
@@ -12978,22 +13103,53 @@ export async function runAgent<T = unknown>(
                   pending.check = {
                     ...pending.check,
                     verdict: 'confirmed',
-                    saw:
+                    saw: said(
                       `it opened a new tab, ${bound.id}` +
-                      (bound.url === '' || bound.url === 'about:blank' ? '' : ` on ${bound.url}`) +
-                      ', which is focused for the next step',
+                        (bound.url === '' || bound.url === 'about:blank' ? '' : ` on ${bound.url}`) +
+                        ', which is focused for the next step',
+                    ),
                   };
                 } else if (fresh[0] !== undefined) {
                   const other = fresh[0];
                   pending.check = {
                     ...pending.check,
                     verdict: 'confirmed',
-                    saw:
+                    saw: said(
                       `a new tab ${other.id} opened` +
-                      (other.url === '' || other.url === 'about:blank' ? ' and has not loaded a page yet' : ` on ${other.url}`) +
-                      `; it was not focused because it is not where the link points (${String(href)}). ` +
-                      'This tab is still focused',
+                        (other.url === '' || other.url === 'about:blank' ? ' and has not loaded a page yet' : ` on ${other.url}`) +
+                        `; it was not focused because it is not where the link points (${String(href)}). ` +
+                        'This tab is still focused',
+                    ),
                   };
+                } else {
+                  // A NAMED WINDOW RE-TARGETED: another tab of the run that
+                  // moved to a new page during the click. Waited for only after
+                  // a click the page read says did nothing, and only with other
+                  // tabs open, so a dead button on a one-tab run costs nothing more.
+                  const before = dispatchedIn?.urls;
+                  const moved = (list: readonly TabInfo[]): TabInfo | undefined =>
+                    list.find(
+                      (tab) =>
+                        tab.id !== pending.tab &&
+                        before?.has(tab.id) === true &&
+                        tab.url !== '' &&
+                        tab.url !== 'about:blank' &&
+                        tab.url !== before.get(tab.id) &&
+                        leadsTo(href ?? resolvedIn.url, tab.url),
+                    );
+                  let retargeted = contradictedHere || href === undefined ? moved(await page.listTabs()) : undefined;
+                  while (retargeted === undefined && contradictedHere && tabs.length > 1 && clock.now() < waitUntil) {
+                    await clock.sleep(NEW_TAB_COMMIT_POLL_MS);
+                    retargeted = moved(await page.listTabs());
+                  }
+                  if (retargeted !== undefined) {
+                    openedByAction = retargeted.id;
+                    pending.check = {
+                      ...pending.check,
+                      verdict: 'confirmed',
+                      saw: said(`it loaded ${retargeted.url} in tab ${retargeted.id}, which is focused for the next step`),
+                    };
+                  }
                 }
               }
               /**
@@ -13194,8 +13350,17 @@ export async function runAgent<T = unknown>(
               }
               if (halt !== undefined) throw halt;
             }
+            // A popup that closed itself on this action: focus goes back to
+            // its opener, and the step is that, not a failure. See `closedTabOutcome`.
+            const closed = await closedNow();
+            if (closed !== undefined) {
+              pending.check = closed.check;
+              pending.tab = closed.focus;
+              return undefined;
+            }
             if (openedByAction !== undefined) {
               await page.focusTab(openedByAction);
+              if (pending.tab !== undefined && !openerOf.has(openedByAction)) openerOf.set(openedByAction, pending.tab);
               pending.tab = openedByAction;
             }
             /**
@@ -13374,6 +13539,23 @@ export async function runAgent<T = unknown>(
       // none is recorded, and the top of the next pass holds.
       if (error instanceof HoldTakenError && !error.decided) {
         stoppedForHold = true;
+        continue;
+      }
+      /**
+       * THE STEP'S TAB CLOSED ITSELF (a popup's `window.close()` after the
+       * click): whatever the host then threw about the tab, the step did what
+       * the page asked of it. Recorded with its check, not as a failure, and
+       * not charged. See {@link closedTabOutcome}.
+       */
+      const closed = cancelSignal?.aborted === true || isBrowserLost(error) ? undefined : await closedNow();
+      if (closed !== undefined) {
+        failure = undefined;
+        pending.check = closed.check;
+        pending.tab = closed.focus;
+        record(traceOf(pending, index, clock.now() - stepStarted, isoTime(wallClock.now())));
+        consecutiveFailures = 0;
+        refusedInRow = 0;
+        busySteps = 0;
         continue;
       }
       failure = error instanceof SolveInProgressError ? VERIFICATION_IN_PROGRESS : errorMessage(error);
