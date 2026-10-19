@@ -349,6 +349,12 @@ export interface DownloadStart {
   readonly url: string;
   /** What the browser expects to name the file. Page-controlled text. */
   readonly filename: string;
+  /**
+   * The host keeps this file for the person who started the run, listed with
+   * the run's downloads. Absent or `false`: the file stays in the browser and
+   * nothing in the run can hand it over.
+   */
+  readonly saved?: boolean;
 }
 
 /**
@@ -6535,7 +6541,7 @@ function fetchesDocument(href: string, pageUrl: string): boolean {
  * page-controlled, so it is quoted and bounded like a customer's file name;
  * the host alone stands for the address, which is on the trace in full. The
  * second half is the truth about the bytes, stated so a model never promises
- * the person who asked a file it cannot return.
+ * the person who asked a file it cannot return, and knows when it can.
  */
 function downloadSaw(download: DownloadStart): string {
   const name = JSON.stringify(download.filename.slice(0, MAX_FILE_NAME_CHARS));
@@ -6547,7 +6553,9 @@ function downloadSaw(download: DownloadStart): string {
   }
   return (
     `it started a download of ${name}${host === '' ? '' : ` from ${host}`}; ` +
-    'the file goes to the browser, and nothing in this run can open it or hand it over'
+    (download.saved === true
+      ? 'the file is being saved for the person who started this run and will be listed with the run\u2019s downloads if it completes'
+      : 'the file goes to the browser, and nothing in this run can open it or hand it over')
   );
 }
 

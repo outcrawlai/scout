@@ -553,6 +553,8 @@ describe('a click that starts a download took effect', () => {
     readonly model: (step: number) => Action;
     readonly begin: (action: Action) => { readonly tab: string; readonly file: string } | undefined;
     readonly earlier?: readonly DownloadStart[];
+    /** The host keeps what the clicks download. */
+    readonly saved?: boolean;
   }): { readonly h: Harness; readonly deps: AgentDeps } {
     const lateMs = DEFAULT_CHECK_POLICY.graceMs + 400;
     const begun: { readonly at: number; readonly download: DownloadStart }[] = (options.earlier ?? []).map((download) => ({ at: 0, download }));
@@ -573,6 +575,7 @@ describe('a click that starts a download took effect', () => {
             tab: started.tab,
             url: `${ORIGIN}/download/${started.file}`,
             filename: started.file,
+            ...(options.saved === undefined ? {} : { saved: options.saved }),
           },
         });
       },
@@ -608,6 +611,31 @@ describe('a click that starts a download took effect', () => {
     // The history line says what the click did, and that the bytes stay put.
     expect(h.prompts[1]?.text).toContain('download of "file.txt"');
     expect(h.prompts[1]?.text).not.toContain('no effect');
+  });
+
+  test('the model is told a kept file is saved for the person who started the run, and an unkept one is not', async () => {
+    const run = async (saved: boolean | undefined) => {
+      const { deps } = downloading({
+        model: (step) => (step === 0 ? clickFile(0) : DONE),
+        begin: (action) => {
+          const file = fileOf(action);
+          return file === undefined ? undefined : { tab: 't0', file };
+        },
+        ...(saved === undefined ? {} : { saved }),
+      });
+      const result = await runAgent(deps, { task: 'download every file', caps: CAPS, stepFailures: 0, settle: false, verify: true });
+      return result.steps[0]?.check?.saw ?? '';
+    };
+
+    const kept = await run(true);
+    expect(kept).toContain('download of "file.txt"');
+    expect(kept).toContain('saved for the person who started this run');
+    expect(kept).not.toContain('nothing in this run can open it');
+
+    for (const unkept of [await run(undefined), await run(false)]) {
+      expect(unkept).toContain('nothing in this run can open it or hand it over');
+      expect(unkept).not.toContain('saved');
+    }
   });
 
   test('a click that changes nothing is still contradicted and charged, whatever the ledger already held', async () => {
