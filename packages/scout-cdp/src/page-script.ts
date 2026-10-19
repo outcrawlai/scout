@@ -66,8 +66,12 @@ const IN_PAGE_GRACE_MS = 1_000;
 /** How often, once a call is past the in-page grace, the runner looks for a renderer that stopped answering. */
 const PEGGED_POLL_MS = 250;
 
-/** What a refused input or navigation method throws in the script world. */
-export const READ_ONLY_TEXT = 'page.script is read-only: use the click/fill actions';
+/**
+ * What a refused input or navigation method throws in the script world. Names the upload actions too: on
+ * 2026-10-19 a run that was refused setting a file input then wrote the file with code.run, which the browser
+ * never sees, and gave up (run_471c9419, 1 of 8 post-roll upload smokes).
+ */
+export const READ_ONLY_TEXT = 'page.script is read-only: use the click/fill actions (createFile and attachFile for uploads)';
 
 /** What a refused request throws in the script world. */
 export const OFF_SITE_TEXT =

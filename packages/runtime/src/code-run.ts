@@ -159,7 +159,8 @@ export const CODE_RUN_TOOL_DESCRIPTION =
   'for counting, sorting, searching and arithmetic. Print what you need to stdout: up to ' +
   `${CODE_RUN_REPLY_MAX_CHARS.toLocaleString('en-US')} characters come back. Python has requests, beautifulsoup4, ` +
   'lxml and pandas; curl and pdftotext are installed. It does not see the browser\u2019s page or cookies: read pages that block ' +
-  `scripts with the browser. ${String(CODE_RUN_TIMEOUT_MS / 1000)} s per call, ${String(CODE_RUNS_PER_RUN)} calls ` +
+  'scripts with the browser. Its files never reach the browser: a file to upload is made with createFile and attached with ' +
+  `attachFile. ${String(CODE_RUN_TIMEOUT_MS / 1000)} s per call, ${String(CODE_RUNS_PER_RUN)} calls ` +
   'per run; each reply says how many are used.';
 
 export function codeRunTools(): readonly ExposedTool[] {
