@@ -39,12 +39,13 @@
  * {@link WrongTabRefError} for why that refusal names the tab.
  */
 import { DEFAULT_MIN_TEXT_LENGTH, isRecord, optionAliases, systemClock, type JsonSchema } from '@outcrawl/scout-core';
-import { ACTIONABLE_ROLES, MAX_DRAG_PX, MIN_DRAG_PX, filterTree, findNode, formatNodeRef, framedInstruction, heldPrivately, isReloadKey, isViewportPoint, nativeDateKeys, nativeDateKind, nativeDateRuns, nativeDateValue, nodeRef, walk, type Action, type AgentDeps, type AgentPrompt, type AxNode, type AxTree, type DragAction, type DragEnd, type ExtractBound, type ExtractContent, type ExtractOutcome, type ExtractSelection, type LookCamera, type LookShot, type NativeDateKind, type RefusedSubmit, type ModelChoice, type NodeRef, type PerformOutcome, type SiteCheckResult, type SiteCheckSighting, type TextCaptchaSighting, type ViewportPoint } from '@outcrawl/runtime';
+import { ACTIONABLE_ROLES, MAX_DRAG_PX, MIN_DRAG_PX, filterTree, findNode, formatNodeRef, framedInstruction, heldPrivately, isReloadKey, isViewportPoint, nativeDateKeys, nativeDateKind, nativeDateRuns, nativeDateValue, nodeRef, walk, type Action, type AgentDeps, type AgentPrompt, type AxNode, type AxTree, type DragAction, type DragEnd, type ExtractBound, type ExtractContent, type ExtractOutcome, type ExtractSelection, type LookCamera, type LookShot, type NativeDateKind, type PageScriptRunner, type RefusedSubmit, type ModelChoice, type NodeRef, type PerformOutcome, type SiteCheckResult, type SiteCheckSighting, type TextCaptchaSighting, type ViewportPoint } from '@outcrawl/runtime';
 import { axTreeFromCdp, frameOrdinalsOf } from './ax-tree';
 import { isCdpTimeout, type CdpPage } from './cdp';
 import { readDocument } from './document';
 import { pageCamera } from './camera';
 import { ancestorsOf, descendantsOf, documentClip, elementOf, hitAt, inLookWorld, lookWorldList, onScreenPart, reachable, scrollPosition, viewport } from './page-reads';
+import { pageScriptRunner } from './page-script';
 import { childFrameIds } from './frames';
 import { outcrawlFlavor } from './flavor';
 import type { LoadRequest, LoadResult, ShotRegion, TabHooks } from './hooks';
@@ -144,6 +145,9 @@ export interface BindingSiteCheck {
 
 /** Each binding's site-check solver, for {@link bindAgent} to hand `page.verify`. */
 export const siteChecks = new WeakMap<AgentDeps, BindingSiteCheck>();
+
+/** Each binding's `page.script` runner, in its page's main frame, for {@link bindAgent} to hand the port. */
+export const scriptRunners = new WeakMap<AgentDeps, PageScriptRunner>();
 
 /**
  * The BORDER box of a `DOM.getBoxModel` reply, as a rect: the area a press
@@ -4190,6 +4194,7 @@ export function pageBinding(page: CdpPage, options: BindingOptions): AgentDeps {
     shootElement,
     ...(findTextCaptcha === undefined ? {} : { findTextCaptcha }),
   });
+  scriptRunners.set(bound, pageScriptRunner(page));
   const hands = options.hands;
   const siteCheck = tab?.captcha?.siteCheck;
   if (hands !== undefined && siteCheck !== undefined) {

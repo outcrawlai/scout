@@ -7,9 +7,9 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import type { Clock } from '@outcrawl/scout-core';
-import { hashSnapshot, nodeRef, renderPrompt, type AgentPrompt, type AxNode, type AxTree, type StepTrace, type ToolCallEcho } from '@outcrawl/runtime';
+import { CODE_RUN_TOOL, CODE_RUN_TOOL_DESCRIPTION, PAGE_SCRIPT_REPLY_MAX_CHARS, PAGE_SCRIPT_TOOL, PAGE_SCRIPT_TOOL_DESCRIPTION, codeRunToolPort, codeRunTools, hashSnapshot, nodeRef, pageScriptTools, renderPrompt, type AgentPrompt, type AxNode, type AxTree, type StepTrace, type ToolCallEcho } from '@outcrawl/runtime';
 
-import { BRAIN_BUDGET, BRAIN_SCHEMA, BRAIN_SYSTEM_PROMPT, BrainThread, actionKey, repeatedActions, retryableNavigations, alreadyRead, reloadAsNavigate, briefElements, briefFacts, rankedReadGap, rawBrief, readBrief, reconciledNavigate, redirectedSite, searchedBefore, selectBrief as selectBriefWithRefs, directAction, threadReply, unconfirmedSlot, wholeRead, wrongListItem, readWithConditions, comboboxMiss, factsBesideReads, listingVerdicts } from '../src/brain';
+import { BRAIN_BUDGET, BRAIN_SCHEMA, BRAIN_SYSTEM_PROMPT, BrainThread, actionKey, repeatedActions, retryableNavigations, alreadyRead, reloadAsNavigate, briefElements, briefFacts, rankedReadGap, rawBrief, readBrief, readDecision, reconciledNavigate, redirectedSite, searchedBefore, selectBrief as selectBriefWithRefs, directAction, threadReply, unconfirmedSlot, wholeRead, wrongListItem, readWithConditions, comboboxMiss, factsBesideReads, listingVerdicts, toolReplies } from '../src/brain';
 import { HarnessModelPort, type ModelPlan } from '../src/harness';
 import { ModelClient } from '../src/client';
 import { CostLedger } from '../src/ledger';
@@ -2355,6 +2355,96 @@ describe('the brain stays inside its budgets', () => {
     thread.commit(5, turn, '{"do":"act"}', 'line');
     expect(thread.step(at(6, [reply(2), reply(3), reply(4)]))).not.toContain('Tool web.read');
     expect(thread.once()).toBe('');
+  });
+
+  test("code.run's description reaches the brain whole, where a connector's is cut", () => {
+    const thread = new BrainThread();
+    const connector = { name: 'inbox.read', description: `Read the inbox. ${'More about mail. '.repeat(20)}MAIL-END` };
+    const first = thread.step({ ...promptFor(TREE, 'count them', 0), tools: [...codeRunTools(), connector] });
+    expect(CODE_RUN_TOOL_DESCRIPTION.length).toBeGreaterThan(160);
+    expect(first).toContain(`Tool ${CODE_RUN_TOOL}: ${CODE_RUN_TOOL_DESCRIPTION}`);
+    expect(first).toContain('Tool inbox.read: Read the inbox.');
+    expect(first).not.toContain('MAIL-END');
+  });
+
+  test("page.script's description reaches the brain whole, where a connector's is cut", () => {
+    const thread = new BrainThread();
+    const connector = { name: 'inbox.read', description: `Read the inbox. ${'More about mail. '.repeat(20)}MAIL-END` };
+    const first = thread.step({ ...promptFor(TREE, 'count them', 0), tools: [...pageScriptTools(), connector] });
+    expect(first).toContain(`Tool ${PAGE_SCRIPT_TOOL}: ${PAGE_SCRIPT_TOOL_DESCRIPTION}`);
+    expect(first).toContain('Tool inbox.read: Read the inbox.');
+    expect(first).not.toContain('MAIL-END');
+  });
+
+  test('the largest code.run reply reaches the brain whole in the turn it arrives', async () => {
+    // Both streams at the sandbox's 64 KiB cap and a failed exit: the most a reply can carry.
+    const port = codeRunToolPort({
+      runner: {
+        run: async () => ({
+          stdout: `${'o'.repeat(65_533)}OUT`,
+          stderr: `${'e'.repeat(65_533)}ERR`,
+          exitCode: 1,
+          timedOut: false,
+          stdoutBytes: 900_000,
+          stderrBytes: 900_000,
+          ms: 59_999,
+          coldStart: true,
+        }),
+      },
+    });
+    const { text } = await port.call(CODE_RUN_TOOL, { language: 'python', code: 'print(1)' });
+    const thread = new BrainThread();
+    const at = (step: number, toolResults: readonly ToolCallEcho[]): AgentPrompt => ({ ...promptFor(TREE, 'count them', step), toolResults });
+    thread.commit(0, thread.step(at(0, [])), '{"do":"act"}', 'line');
+    thread.step(at(1, [{ step: 0, tool: CODE_RUN_TOOL, isError: false, text }]));
+    expect(text).toContain('ERR');
+    expect(thread.once()).toContain(text);
+  });
+
+  test('a code.run reply that does not fit beside the turn\u2019s other replies asks for less output, not a re-run', () => {
+    const read: ToolCallEcho = { step: 1, tool: 'web.read', isError: false, text: `Page — https://example.com\n${'r'.repeat(4_200)}` };
+    const code: ToolCallEcho = {
+      step: 2,
+      tool: CODE_RUN_TOOL,
+      isError: false,
+      text: `code.run (3 of 20) python exited 0 after 2.1 s.\nstdout (12,000 characters):\n${'o'.repeat(12_000)}`,
+    };
+    const { kept, once } = toolReplies([read, code]);
+    expect(once).toContain(read.text);
+    expect(once).not.toContain('ooooo');
+    expect(kept).toContain(
+      'Tool code.run: output NOT shown, too long to show beside the other tool replies this turn: code.run (3 of 20) python exited 0 after 2.1 s.. ' +
+        'Print less, or write the output to a file in /work and print a slice of it; do not run the same program again to read it.',
+    );
+    expect(kept).not.toContain('Call it again');
+  });
+
+  test('a brain reply calling code.run with a long program runs directly with the code intact', () => {
+    const code = Array.from({ length: 80 }, (_, i) => `rows_${String(i)} = [r.get_text(strip=True) for r in soup.select('table tr')][:${String(i)}]`).join('\n');
+    expect(code.length).toBeGreaterThan(5_000);
+    const decision = readDecision(JSON.parse(JSON.stringify({ do: 'act', a: { type: 'callTool', tool: CODE_RUN_TOOL, arguments: { language: 'python', code } } })));
+    expect(decision?.kind).toBe('act');
+    const direct = decision?.kind === 'act' ? directAction(decision.action, undefined, TREE) : undefined;
+    expect(direct).toEqual({ ok: true, action: { type: 'callTool', tool: CODE_RUN_TOOL, arguments: { language: 'python', code } } });
+  });
+
+  test('the largest page.script reply reaches the brain whole in the turn it arrives', () => {
+    const thread = new BrainThread();
+    const at = (step: number, toolResults: readonly ToolCallEcho[]): AgentPrompt => ({ ...promptFor(TREE, 'count them', step), toolResults });
+    thread.commit(0, thread.step(at(0, [])), '{"do":"act"}', 'line');
+    const body = `${'r'.repeat(PAGE_SCRIPT_REPLY_MAX_CHARS - 3)}END`;
+    const text = `page.script (1 of 40) returned 30,000 characters; the first 12,000 follow and the other 18,000 were cut (return less: filter, slice or count in the code):\n${body}`;
+    thread.step(at(1, [{ step: 0, tool: PAGE_SCRIPT_TOOL, isError: false, text }]));
+    expect(thread.once()).toContain(body);
+  });
+
+  test('a brain reply calling page.script with a long script runs directly with the code intact', () => {
+    const code = Array.from({ length: 80 }, (_, i) => `const row${String(i)} = [...document.querySelectorAll('tr')].map((r) => r.innerText);`).join('\n');
+    expect(code.length).toBeGreaterThan(5_000);
+    const decision = readDecision(JSON.parse(JSON.stringify({ do: 'act', a: { type: 'callTool', tool: PAGE_SCRIPT_TOOL, arguments: { code } } })));
+    expect(decision?.kind).toBe('act');
+    const direct = decision?.kind === 'act' ? directAction(decision.action, undefined, TREE) : undefined;
+    expect(direct).toEqual({ ok: true, action: { type: 'callTool', tool: PAGE_SCRIPT_TOOL, arguments: { code } } });
   });
 
   test('a long search reply shows its first results and names the rest as not shown; nothing of it goes once', () => {

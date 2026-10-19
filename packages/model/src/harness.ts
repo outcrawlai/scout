@@ -2594,8 +2594,20 @@ const EYES_MAX_TOKENS = 1_536;
  * with no tool offered; its model now answers through an offered tool
  * ('tool_auto', see `StructuredOutputMode`), and on replayed brain prompts
  * none ran away (0 of 213, 2026-10-14, against 14 of 213 in text).
+ *
+ * 4,000 for `page.script` and `code.run` (ws/page-script 2026-10-17, ws/code-run
+ * 2026-10-18): each tool's `code` argument is written in the reply, on top of
+ * the reasoning above (p99 1,945), and a reply cut mid-script is a step with
+ * no decision. MEASURED, n=1, dev-set smoke run_05797e11 (2026-10-17): the
+ * brain reply carrying a 558-character script was 535 completion tokens, its
+ * reasoning (259 characters) included. MEASURED, dev-set sub-runner smoke of
+ * 10f0e323b (2026-10-18, n=3 code.run replies over 2 runs): programs of 362,
+ * 512 and 507 characters came in replies of 336, 364 and 1,205 completion
+ * tokens, reasoning included; the largest of the 55 brain replies in those
+ * runs was 1,757. How those tokens split between the code and the rest is not
+ * measured. A finished reply bills only what it wrote.
  */
-const BRAIN_MAX_TOKENS = 3_000;
+const BRAIN_MAX_TOKENS = 4_000;
 
 /** A task that asks the run to collect or record things as it goes. */
 const COLLECT_TASK = /\b(record|collect|note down|write down|keep track|list (each|every|all)|for each|each of the|every one)\b/i;

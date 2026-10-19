@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test';
 import { compareDecimal, multiplyDecimal } from '@outcrawl/scout-core';
 
 import { RefusedActionError, type Action } from '../src/actions';
+import { CODE_RUN_TOOL, CodeSandboxUnavailableError, codeRunToolPort } from '../src/code-run';
 import type { AgentPrompt, EvidenceOutcome, LockedPage, ModelChoice, PerformOutcome, ToolPort } from '../src/loop';
 import { LockNotHeldError, PageSession, REFUSED_STEP_TOLERANCE, observe, runAgent } from '../src/loop';
 import type { DurableRecord, StepTrace } from '../src/result';
@@ -2322,6 +2323,64 @@ describe('page.verify failing on a check that is on the page', () => {
 
     expect(absent.isError && absent.standingCheck === undefined).toBe(true);
     expect(limit.isError && limit.standingCheck === undefined).toBe(true);
+  });
+});
+
+/**
+ * code.run's machine being down (refused credentials, out of instances, an
+ * outage) is the tool's outage, not the model failing: three failed clicks
+ * and then two unavailable answers used to make five consecutive failures and
+ * end a run that could carry on in the browser.
+ */
+describe('code.run when its machine is unavailable', () => {
+  const code: Action = { type: 'callTool', tool: CODE_RUN_TOOL, arguments: { language: 'python', code: 'print(1)' } };
+  const clickFails = (action: Action): void => {
+    if (action.type === 'click') throw new Error('the click changed nothing');
+  };
+  const down = (): { port: ToolPort; asked: () => number } => {
+    let asked = 0;
+    const port = codeRunToolPort({
+      runner: {
+        run: () => {
+          asked += 1;
+          return Promise.reject(new CodeSandboxUnavailableError('the code sandbox could not run it, twice (503): no container instance'));
+        },
+      },
+    });
+    return { port, asked: () => asked };
+  };
+
+  test('is never the failure that ends the run, and after two in a row the machine is not asked again', async () => {
+    const h = harness({
+      tree: page,
+      perform: clickFails,
+      model: script(
+        { action: click }, { action: click }, { action: click },
+        { action: code }, { action: code }, { action: code },
+        { action: done },
+      ),
+    });
+    const { port, asked } = down();
+
+    const result = await runAgent({ ...h.deps, tools: port }, { task: 't', caps: { ...CAPS, steps: 10 }, stepFailures: 3 });
+
+    expect(result.status).toBe('completed');
+    expect(asked()).toBe(2);
+    const replies = [3, 4, 5].map((step) => h.prompts[step + 1]?.toolResults?.find((echo) => echo.step === step)?.text);
+    expect(replies.every((text) => text?.endsWith('continue in the browser or with the web tools.'))).toBe(true);
+  });
+
+  test('neither charges nor clears the count, so a page ignoring every click still stops the run', async () => {
+    const h = harness({
+      tree: page,
+      perform: clickFails,
+      model: script({ action: click }, { action: click }, { action: click }, { action: code }, { action: click }, { action: done }),
+    });
+
+    const result = await runAgent({ ...h.deps, tools: down().port }, { task: 't', caps: CAPS, stepFailures: 3 });
+
+    expect(result.stopReason).toBe('error');
+    expect(result.steps).toHaveLength(5);
   });
 });
 

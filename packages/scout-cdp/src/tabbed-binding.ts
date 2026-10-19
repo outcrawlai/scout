@@ -3,7 +3,7 @@ import type { Action, AgentDeps, AgentPrompt, AxTree, ExtractBound, ExtractOutco
 import { CrossFrameRefError } from './errors';
 import type { BindingOptions } from './options';
 import { fanHolds } from './input';
-import { cameras, pageBinding, siteChecks, type BindingCamera, type BindingSiteCheck } from './page-binding';
+import { cameras, pageBinding, scriptRunners, siteChecks, type BindingCamera, type BindingSiteCheck } from './page-binding';
 import { TabLostError, UnknownTabError, WrongTabRefError, type AgentTab, type AgentTabs, type TabLoss } from './tabs';
 
 /**
@@ -428,6 +428,17 @@ export function tabbedBinding(tabs: AgentTabs, options: BindingOptions): AgentDe
       ? {}
       : { findTextCaptcha: async (tree: AxTree) => (await focusedCamera()).findTextCaptcha?.(tree) }),
     shootElement: async (ref) => (await focusedCamera()).shootElement(ref),
+  });
+  // The FOCUSED tab's page, for `capture`'s reason: a script reads the page the
+  // next action touches.
+  scriptRunners.set(routed, {
+    async run(code, timeoutMs) {
+      const runner = scriptRunners.get((await focused()).deps);
+      if (runner === undefined) {
+        throw new TypeError('the focused tab binding registered no script runner');
+      }
+      return runner.run(code, timeoutMs);
+    },
   });
   // The FOCUSED tab's check solver, for `capture`'s reason: the check the model saw
   // is on the page the next action touches.

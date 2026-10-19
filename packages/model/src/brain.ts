@@ -67,9 +67,11 @@ import {
   ASK_GRAMMAR,
   ASK_RULE,
   askWantRule,
+  CODE_RUN_TOOL,
   describeAction,
   humanDuration,
   isReloadKey,
+  PAGE_SCRIPT_TOOL,
   PURCHASE_GRAMMAR,
   PURCHASE_RULE,
   serializeTree,
@@ -3926,8 +3928,10 @@ export interface ToolReplyView {
  *
  * A reply that does not fit the turn is not cut: it is named, with its first
  * line, as not shown, so the brain calls it again rather than page on from an
- * offset past text it never read. Only a single reply larger than the whole
- * budget is cut, and says where.
+ * offset past text it never read. Not `code.run`: calling it again runs the
+ * program again, spends one of its calls and repeats what it did, so its
+ * not-shown line asks for less output instead. Only a single reply larger
+ * than the whole budget is cut, and says where.
  */
 export function toolReplies(echoes: readonly ToolCallEcho[], budget: number = BRAIN_BUDGET.tools): ToolReplyView {
   const kept: string[] = [];
@@ -3949,6 +3953,11 @@ export function toolReplies(echoes: readonly ToolCallEcho[], budget: number = BR
       );
       once.push(cut ? `${whole.slice(0, budget)}… (reply cut here: its last ${String(whole.length - budget)} characters were not shown)` : whole);
       used += Math.min(whole.length, budget) + 1;
+    } else if (echo.tool === CODE_RUN_TOOL) {
+      kept.push(
+        `Tool ${echo.tool}: output NOT shown, too long to show beside the other tool replies this turn: ${clip(echo.text.split('\n', 1)[0] ?? '', 160)}. ` +
+          'Print less, or write the output to a file in /work and print a slice of it; do not run the same program again to read it.',
+      );
     } else {
       kept.push(
         `Tool ${echo.tool}: reply NOT shown (over this turn's limit for tool replies): ${clip(echo.text.split('\n', 1)[0] ?? '', 160)}. Call it again on its own to read it.`,
@@ -4027,7 +4036,12 @@ function runHeader(prompt: AgentPrompt): string {
     );
   }
   for (const tool of prompt.tools ?? []) {
-    lines.push(`Tool ${tool.name}: ${clip(tool.description, 160)}${tool.inputSchema === undefined ? '' : ` ${JSON.stringify(tool.inputSchema)}`}`);
+    // Every description cut at 160 characters but code.run's and page.script's:
+    // each one's description is the brain's only instruction about it, and 160
+    // would end it before what to use it for (code.run: that it does not see
+    // the browser's page; page.script: that it never clicks or types).
+    const description = tool.name === CODE_RUN_TOOL || tool.name === PAGE_SCRIPT_TOOL ? tool.description : clip(tool.description, 160);
+    lines.push(`Tool ${tool.name}: ${description}${tool.inputSchema === undefined ? '' : ` ${JSON.stringify(tool.inputSchema)}`}`);
   }
   if ((prompt.tools ?? []).some((tool) => tool.name.startsWith('web.'))) {
     lines.push(WEB_TOOLS_RULE);

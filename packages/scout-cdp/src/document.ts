@@ -113,8 +113,12 @@ const READ_WORLD_NAME = 'outcrawl-read';
  * `WindowProxy(world)` the context for a window, so a second call on the same
  * document answers the same context id. A new document is a new context,
  * which is why the id is never cached across reads.
+ *
+ * `worldName` names another world for a caller whose code must not share
+ * globals with this read: `page.script` runs code the model wrote, which may
+ * replace a prototype method this read relies on.
  */
-export async function readWorld(page: CdpPage): Promise<number> {
+export async function readWorld(page: CdpPage, worldName: string = READ_WORLD_NAME): Promise<number> {
   const tree = nested(await page.send('Page.getFrameTree'), 'frameTree');
   const frameId = (tree === undefined ? undefined : nested(tree, 'frame'))?.['id'];
   if (typeof frameId !== 'string' || frameId === '') {
@@ -122,7 +126,7 @@ export async function readWorld(page: CdpPage): Promise<number> {
   }
   const created = await page.send('Page.createIsolatedWorld', {
     frameId,
-    worldName: READ_WORLD_NAME,
+    worldName,
     grantUniveralAccess: false,
   });
   const contextId = created['executionContextId'];

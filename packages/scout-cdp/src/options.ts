@@ -117,6 +117,14 @@ export interface BindingOptions {
    * module's `DEFAULT_LOOKS_PER_RUN`.
    */
   readonly maxLooks?: number;
+  /**
+   * Scripts this run already ran on the browsers it lost, read back from its
+   * durable steps (`scriptsTaken` in `@outcrawl/runtime`), so `page.script`'s
+   * allowance holds per RUN across re-acquisition and resume. Absent is zero.
+   * The port itself is bound on every binding: its runner is the binding's
+   * own page, in an isolated world.
+   */
+  readonly scriptsTaken?: number;
   /** Monotonic, for the dwell inside a gesture plan. Defaults to core's `systemClock`. */
   readonly clock?: Clock;
   /**

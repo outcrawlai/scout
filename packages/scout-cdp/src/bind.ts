@@ -1,9 +1,9 @@
 import type { AgentDeps, TextCaptchaPort } from '@outcrawl/runtime';
-import { TEXT_CAPTCHA_QUESTION, lookToolPort, siteCheckToolPort, textCaptchaCode } from '@outcrawl/runtime';
+import { TEXT_CAPTCHA_QUESTION, lookToolPort, pageScriptToolPort, siteCheckToolPort, textCaptchaCode } from '@outcrawl/runtime';
 
 import type { CdpPage } from './cdp';
 import type { BindingOptions } from './options';
-import { cameras, pageBinding, siteChecks } from './page-binding';
+import { cameras, pageBinding, scriptRunners, siteChecks } from './page-binding';
 import { tabbedBinding } from './tabbed-binding';
 import { composeToolPorts } from './tools';
 
@@ -25,36 +25,41 @@ export function bindAgent(page: CdpPage, options: BindingOptions): AgentDeps {
   const tabs = options.tabs;
   const deps = tabs === null ? pageBinding(page, options) : tabbedBinding(tabs, options);
   const camera = cameras.get(deps);
+  const runner = scriptRunners.get(deps);
   const siteCheck = siteChecks.get(deps);
   // The model's `page.verify` and the loop's sighted check share this one
   // port, so they share its allowance.
   const siteCheckPort =
     siteCheck === undefined ? undefined : siteCheckToolPort({ solve: () => siteCheck.solve(), sight: () => siteCheck.sight() });
   const sighted = siteCheckPort === undefined ? {} : { sightedCheck: siteCheckPort };
-  if (options.look === undefined || camera === undefined) {
-    const tools = composeToolPorts(options.tools, siteCheckPort);
-    if (siteCheckPort === undefined && (tools === undefined || tools === options.tools)) return deps;
-    return { ...deps, ...(tools === undefined || tools === options.tools ? {} : { tools }), ...sighted };
-  }
-  const vision = options.look;
+  const vision = camera === undefined ? undefined : options.look;
   // ONE port of each per binding, and a binding is one run: each tool's
   // allowance lives in its port, so a per-tab port would hand every tab a
   // fresh one.
   const composed = composeToolPorts(
     options.tools,
-    lookToolPort({
-      camera,
-      vision,
-      ...(options.looksTaken === undefined ? {} : { taken: options.looksTaken }),
-      ...(options.maxLooks === undefined ? {} : { maxLooks: options.maxLooks }),
-    }),
+    vision === undefined || camera === undefined
+      ? undefined
+      : lookToolPort({
+          camera,
+          vision,
+          ...(options.looksTaken === undefined ? {} : { taken: options.looksTaken }),
+          ...(options.maxLooks === undefined ? {} : { maxLooks: options.maxLooks }),
+        }),
+    runner === undefined
+      ? undefined
+      : pageScriptToolPort({ runner, ...(options.scriptsTaken === undefined ? {} : { taken: options.scriptsTaken }) }),
     siteCheckPort,
   );
-  // A look is a model reading the page, and its answer is text the run's
+  // A look or a script reads the page, and its answer is text the run's
   // model reads and its step records: the host may wrap the port, e.g. to
   // scrub a secret a look named like any other page text.
   const wrap = options.hooks?.tools;
-  const tools = composed === undefined || wrap === undefined ? composed : wrap(composed);
+  const tools = composed === undefined || composed === options.tools || wrap === undefined ? composed : wrap(composed);
+  if (vision === undefined || camera === undefined) {
+    if (siteCheckPort === undefined && tools === options.tools) return deps;
+    return { ...deps, ...(tools === undefined ? {} : { tools }), ...sighted };
+  }
   // Text captchas are read by the same vision model, outside the look
   // allowance: the host finds them, not the model.
   const find = camera.findTextCaptcha;

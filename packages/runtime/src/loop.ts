@@ -153,7 +153,9 @@ import {
   reportOnlyResult,
   resumeNotice,
 } from './resume';
+import { CODE_RUN_TOOL } from './code-run';
 import { LOOK_TOOL } from './look';
+import { PAGE_SCRIPT_TOOL } from './page-script';
 import { SITE_CHECK_TOOL } from './site-check';
 import { NO_RULES, checkNavigationRules, checkRules, enforceRules, renderRules } from './rules';
 import type { AfterSolve, DocumentProbe, SettlePolicy, SettleReport } from './settle';
@@ -794,6 +796,16 @@ export interface ToolCallOutcome {
    * stopped the run at 50 of 2000 credits and 97 s of 30 min.
    */
   readonly standingCheck?: { readonly reload: boolean };
+  /**
+   * `code.run` only: the code machine could not be had at all (see
+   * `CodeSandboxUnavailableError` in `./code-run`), so nothing ran. The tool's
+   * outage, not the model failing, so like {@link standingCheck} it is not
+   * charged to `stepFailures` and does not zero it: an optional tool being
+   * down must not be the failure that ends a run that can carry on in the
+   * browser. The port bounds it by answering itself after two in a row.
+   * Honoured only from that tool's name: a connector's reply may claim anything.
+   */
+  readonly unavailable?: true;
 }
 
 /**
@@ -821,12 +833,15 @@ export interface ToolCallEcho {
  * got.
  */
 class ToolReplyError extends Error {
-  /** The reply's {@link ToolCallOutcome.standingCheck} was set: not charged to `stepFailures`. */
-  readonly standingCheck: boolean;
-  constructor(tool: string, standingCheck = false) {
+  /**
+   * The reply's {@link ToolCallOutcome.standingCheck} or
+   * {@link ToolCallOutcome.unavailable} was set: not charged to `stepFailures`.
+   */
+  readonly uncharged: boolean;
+  constructor(tool: string, uncharged = false) {
     super(`${tool} reported an error; its reply is in the tool results block of the next prompt`);
     this.name = 'ToolReplyError';
-    this.standingCheck = standingCheck;
+    this.uncharged = uncharged;
   }
 }
 
@@ -2649,8 +2664,8 @@ export class PageSession {
 
   /**
    * `work` with the page LIVE, and the freeze back up before this returns —
-   * {@link thinkLive}'s discipline, shared with the one tool call that needs a
-   * live page ({@link callTool} for `page.look`). A page that is not frozen
+   * {@link thinkLive}'s discipline, shared with the tool calls that need a
+   * live page ({@link callTool} for `page.look` and `page.script`). A page that is not frozen
    * (a human holding it, an in-page solve) runs `work` as it is.
    */
   async #onLivePage<T>(work: () => MaybePromise<T>): Promise<T> {
@@ -2839,6 +2854,11 @@ export class PageSession {
    * live page, released and retaken exactly as {@link thinkLive} does; it is
    * still invisible to the page, and the next step reads the tree afresh.
    *
+   * `page.script` too, and for the lock rule above {@link capture}: under
+   * `kPause` a script's `fetch` never answers and its timers never fire, and
+   * an evaluation is made only with the freeze down. Its isolated world is
+   * invisible to the page; the next step reads the tree afresh.
+   *
    * Refuses by name when no port is bound, which is
    * {@link AgentDeps.tabs}'s discipline: a run with no connectors is a run
    * whose prompt never offered the grammar, so reaching this is a model
@@ -2867,7 +2887,7 @@ export class PageSession {
     if (tool === SITE_CHECK_TOOL) {
       return this.#siteCheck(port, args);
     }
-    return tool === LOOK_TOOL ? this.#onLivePage(() => port.call(tool, args)) : port.call(tool, args);
+    return tool === LOOK_TOOL || tool === PAGE_SCRIPT_TOOL ? this.#onLivePage(() => port.call(tool, args)) : port.call(tool, args);
   }
 
   /**
@@ -12307,7 +12327,8 @@ export async function runAgent<T = unknown>(
                 // mailbox. Same rule as the success path, applied where it is
                 // easiest to forget.
                 if (result.isError) {
-                  throw new ToolReplyError(action.tool, standing !== undefined);
+                  const unavailable = action.tool === CODE_RUN_TOOL && result.unavailable === true;
+                  throw new ToolReplyError(action.tool, standing !== undefined || unavailable);
                 }
                 // `result.credits` when the port priced this call (a `web.*`
                 // tool's page fetch; absent for a connector call) — reaching
@@ -13326,14 +13347,16 @@ export async function runAgent<T = unknown>(
         continue;
       }
       /**
-       * `page.verify` COULD NOT CLEAR A CHECK THAT IS ON THE PAGE: the tool
-       * failing, not the page ignoring the agent, so it is not charged to
-       * `stepFailures` — and does not zero it either, so a real no-effect run
-       * around it still stops. Bounded by the tool's own call limit; a call
-       * past it, or one that finds no check, is charged as before. See
+       * `page.verify` COULD NOT CLEAR A CHECK THAT IS ON THE PAGE, or
+       * `code.run`'s MACHINE COULD NOT BE HAD: the tool failing, not the page
+       * ignoring the agent, so it is not charged to `stepFailures` — and does
+       * not zero it either, so a real no-effect run around it still stops.
+       * Bounded by each tool's own limit (page.verify's call limit; code.run
+       * answers without its machine after two in a row); a page.verify call
+       * past its limit, or one that finds no check, is charged as before. See
        * {@link ToolCallOutcome.standingCheck} for the run it ended.
        */
-      if (error instanceof ToolReplyError && error.standingCheck) {
+      if (error instanceof ToolReplyError && error.uncharged) {
         failure = undefined;
         continue;
       }
