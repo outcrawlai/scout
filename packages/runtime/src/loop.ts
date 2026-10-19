@@ -742,6 +742,13 @@ export interface ExposedConnector {
   readonly description?: string;
 }
 
+/**
+ * The built-in research question tool (its port is the worker's): named here
+ * because the loop honours its {@link ToolCallOutcome.unavailable} and the
+ * brain gives its replies their own branch.
+ */
+export const WEB_ASK_TOOL = 'web.ask';
+
 /** What one `callTool` came back with. `isError` is the tool's own verdict. */
 export interface ToolCallOutcome {
   readonly text: string;
@@ -797,13 +804,14 @@ export interface ToolCallOutcome {
    */
   readonly standingCheck?: { readonly reload: boolean };
   /**
-   * `code.run` only: the code machine could not be had at all (see
-   * `CodeSandboxUnavailableError` in `./code-run`), so nothing ran. The tool's
+   * `code.run` and `web.ask` only: the tool's own machine could not be had or
+   * did not answer (see `CodeSandboxUnavailableError` in `./code-run`; for
+   * `web.ask`, its answer engine failing), so nothing came back. The tool's
    * outage, not the model failing, so like {@link standingCheck} it is not
    * charged to `stepFailures` and does not zero it: an optional tool being
    * down must not be the failure that ends a run that can carry on in the
-   * browser. The port bounds it by answering itself after two in a row.
-   * Honoured only from that tool's name: a connector's reply may claim anything.
+   * browser. Each port bounds it by answering itself after two in a row.
+   * Honoured only from those tools' names: a connector's reply may claim anything.
    */
   readonly unavailable?: true;
 }
@@ -12327,7 +12335,7 @@ export async function runAgent<T = unknown>(
                 // mailbox. Same rule as the success path, applied where it is
                 // easiest to forget.
                 if (result.isError) {
-                  const unavailable = action.tool === CODE_RUN_TOOL && result.unavailable === true;
+                  const unavailable = (action.tool === CODE_RUN_TOOL || action.tool === WEB_ASK_TOOL) && result.unavailable === true;
                   throw new ToolReplyError(action.tool, standing !== undefined || unavailable);
                 }
                 // `result.credits` when the port priced this call (a `web.*`

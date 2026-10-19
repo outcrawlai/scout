@@ -712,7 +712,7 @@ export interface AgentToolCharge {
   readonly kind: 'page_load' | 'search_result';
   /** The capability the row is filed under: what the tool really ran. */
   readonly capability: 'scrape' | 'search';
-  /** The tool, as the run's steps name it (`web.read`, `web.search`). */
+  /** The tool, as the run's steps name it (`web.read`, `web.search`, `web.ask`). */
   readonly tool: string;
   /** Exact decimal string, in the kind's unit. */
   readonly quantity: string;

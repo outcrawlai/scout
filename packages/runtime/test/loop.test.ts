@@ -5,7 +5,7 @@ import { compareDecimal, multiplyDecimal } from '@outcrawl/scout-core';
 import { RefusedActionError, type Action } from '../src/actions';
 import { CODE_RUN_TOOL, CodeSandboxUnavailableError, codeRunToolPort } from '../src/code-run';
 import type { AgentPrompt, EvidenceOutcome, LockedPage, ModelChoice, PerformOutcome, ToolPort } from '../src/loop';
-import { LockNotHeldError, PageSession, REFUSED_STEP_TOLERANCE, observe, runAgent } from '../src/loop';
+import { LockNotHeldError, PageSession, REFUSED_STEP_TOLERANCE, WEB_ASK_TOOL, observe, runAgent } from '../src/loop';
 import type { DurableRecord, StepTrace } from '../src/result';
 import { MAX_STEP_BRIEF_CHARS, MAX_TOOL_NOTE_CHARS, toWireStep } from '../src/result';
 import { SITE_CHECK_TOOL, siteCheckToolPort, type SiteCheckResult } from '../src/site-check';
@@ -2381,6 +2381,51 @@ describe('code.run when its machine is unavailable', () => {
 
     expect(result.stopReason).toBe('error');
     expect(result.steps).toHaveLength(5);
+  });
+});
+
+/**
+ * web.ask's answer engine failing (a 5xx, a rate limit, a timeout) is the
+ * tool's outage on the same terms as code.run's machine: a brain retrying it
+ * during an outage must not end a run that web.search could carry. Honoured
+ * only from the tool's own name.
+ */
+describe('web.ask when its answer engine is unavailable', () => {
+  const ask = (tool: string): Action => ({ type: 'callTool', tool, arguments: { question: 'which bridge?' } });
+  const outage = (tool: string): ToolPort => ({
+    list: () => [{ name: tool, description: 'ask' }],
+    call: () => Promise.resolve({ isError: true, unavailable: true, text: `${tool} got no answer: HTTP 502 (unavailable).` }),
+  });
+  const clickFails = (action: Action): void => {
+    if (action.type === 'click') throw new Error('the click changed nothing');
+  };
+
+  test('is never the failure that ends the run', async () => {
+    const h = harness({
+      tree: page,
+      perform: clickFails,
+      model: script(
+        { action: click }, { action: click }, { action: click },
+        { action: ask(WEB_ASK_TOOL) }, { action: ask(WEB_ASK_TOOL) }, { action: ask(WEB_ASK_TOOL) },
+        { action: done },
+      ),
+    });
+
+    const result = await runAgent({ ...h.deps, tools: outage(WEB_ASK_TOOL) }, { task: 't', caps: { ...CAPS, steps: 10 }, stepFailures: 3 });
+
+    expect(result.status).toBe('completed');
+  });
+
+  test('the same reply from another tool is charged, and the run ends', async () => {
+    const h = harness({
+      tree: page,
+      perform: clickFails,
+      model: script({ action: click }, { action: click }, { action: click }, { action: ask('mail.search') }, { action: ask('mail.search') }, { action: done }),
+    });
+
+    const result = await runAgent({ ...h.deps, tools: outage('mail.search') }, { task: 't', caps: { ...CAPS, steps: 10 }, stepFailures: 3 });
+
+    expect(result.stopReason).toBe('error');
   });
 });
 

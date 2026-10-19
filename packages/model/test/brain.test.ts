@@ -2376,6 +2376,33 @@ describe('the brain stays inside its budgets', () => {
     expect(first).not.toContain('MAIL-END');
   });
 
+  test("web.ask's description reaches the brain whole, and its largest reply goes whole once, not cut like a search's", () => {
+    const description = `Ask a research question in plain language. ${'It searches and answers with sources. '.repeat(8)}ASK-END`;
+    const thread = new BrainThread();
+    const at = (step: number, toolResults: readonly ToolCallEcho[]): AgentPrompt => ({ ...promptFor(TREE, 'name it', step), toolResults });
+    const first = thread.step({ ...at(0, []), tools: [{ name: 'web.ask', description }] });
+    expect(first).toContain(`Tool web.ask: ${description}`);
+    thread.commit(0, first, '{"do":"act"}', 'line');
+    // The worker caps a web.ask reply at 6,000 characters (WEB_ASK_REPLY_MAX_CHARS in worker/src/web-ask.ts).
+    const text = `web.ask (1 of 15):\n${'a'.repeat(5_900)} ANSWER-END\n\nSources:\n[1] https://s1.example/ — S1`;
+    const turn = thread.step(at(1, [{ step: 0, tool: 'web.ask', isError: false, text }]));
+    expect(thread.once()).toContain(text);
+    expect(turn).toContain('characters were shown once, in the turn this arrived');
+    expect(turn).not.toContain('ask for fewer results');
+  });
+
+  test("a web.ask reply that does not fit the turn keeps its answer's start and is never sent back to be asked again", () => {
+    // Two page reads fill most of the turn's budget; a third reply, the paid answer, no longer fits beside them.
+    const page = (n: number): ToolCallEcho => ({ step: n, tool: 'web.read', isError: false, text: `page ${String(n)} ${'p'.repeat(5_500)}` });
+    const answer = `web.ask (3 of 15):\nANSWER-START It is the Salginatobel Bridge.[1] ${'a'.repeat(2_500)} ANSWER-END\n\nSources:\n[1] https://s1.example/`;
+    const view = toolReplies([page(0), page(1), { step: 2, tool: 'web.ask', isError: false, text: answer }]);
+    expect(view.once).not.toContain('ANSWER-START');
+    expect(view.kept).toContain(`Tool web.ask: ${answer.slice(0, BRAIN_BUDGET.toolKept)}…`);
+    expect(view.kept).toContain('do not ask the same question again');
+    expect(view.kept).not.toContain('ANSWER-END');
+    expect(view.kept).not.toContain('Call it again');
+  });
+
   test('the largest code.run reply reaches the brain whole in the turn it arrives', async () => {
     // Both streams at the sandbox's 64 KiB cap and a failed exit: the most a reply can carry.
     const port = codeRunToolPort({

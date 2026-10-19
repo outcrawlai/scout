@@ -77,6 +77,7 @@ import {
   serializeTree,
   TREE_CHAR_BUDGET,
   validateAction,
+  WEB_ASK_TOOL,
   type Action,
   type AgentPrompt,
   type AxNode,
@@ -3917,7 +3918,8 @@ export interface ToolReplyView {
  * thread, which every later call replays, keeps its first
  * {@link BRAIN_BUDGET}.toolKept characters. A `web.search` reply is leads,
  * not evidence: it is shown and kept to its first `toolKept` characters, with
- * the rest named as not shown.
+ * the rest named as not shown. A `web.ask` reply is an answer with its
+ * sources, not leads, so it goes whole once like a page's text.
  *
  * Measured on the dev set, 2026-10-14. Kept whole in the replayed thread
  * (21c8df21), replies grew a long BrowseComp run's prefix and its fold
@@ -3930,8 +3932,11 @@ export interface ToolReplyView {
  * line, as not shown, so the brain calls it again rather than page on from an
  * offset past text it never read. Not `code.run`: calling it again runs the
  * program again, spends one of its calls and repeats what it did, so its
- * not-shown line asks for less output instead. Only a single reply larger
- * than the whole budget is cut, and says where.
+ * not-shown line asks for less output instead. Not `web.ask` either: asking
+ * again is another paid call and another of the run's allowance, so its
+ * thread keeps its first `toolKept` characters (the answer comes first) and
+ * says not to ask the same question again. Only a single reply larger than
+ * the whole budget is cut, and says where.
  */
 export function toolReplies(echoes: readonly ToolCallEcho[], budget: number = BRAIN_BUDGET.tools): ToolReplyView {
   const kept: string[] = [];
@@ -3957,6 +3962,11 @@ export function toolReplies(echoes: readonly ToolCallEcho[], budget: number = BR
       kept.push(
         `Tool ${echo.tool}: output NOT shown, too long to show beside the other tool replies this turn: ${clip(echo.text.split('\n', 1)[0] ?? '', 160)}. ` +
           'Print less, or write the output to a file in /work and print a slice of it; do not run the same program again to read it.',
+      );
+    } else if (echo.tool === WEB_ASK_TOOL) {
+      kept.push(
+        `${head}: ${echo.text.slice(0, BRAIN_BUDGET.toolKept)}… (the other ${String(echo.text.length - BRAIN_BUDGET.toolKept)} characters were NOT shown: ` +
+          'too long to show beside the other tool replies this turn. Work from this start; do not ask the same question again)',
       );
     } else {
       kept.push(
@@ -4036,11 +4046,13 @@ function runHeader(prompt: AgentPrompt): string {
     );
   }
   for (const tool of prompt.tools ?? []) {
-    // Every description cut at 160 characters but code.run's and page.script's:
-    // each one's description is the brain's only instruction about it, and 160
-    // would end it before what to use it for (code.run: that it does not see
-    // the browser's page; page.script: that it never clicks or types).
-    const description = tool.name === CODE_RUN_TOOL || tool.name === PAGE_SCRIPT_TOOL ? tool.description : clip(tool.description, 160);
+    // Every description cut at 160 characters but code.run's, page.script's and
+    // web.ask's: each one's description is the brain's only instruction about
+    // it, and 160 would end it before what to use it for (code.run: that it
+    // does not see the browser's page; page.script: that it never clicks or
+    // types; web.ask: to open a cited source before the final answer).
+    const whole = tool.name === CODE_RUN_TOOL || tool.name === PAGE_SCRIPT_TOOL || tool.name === WEB_ASK_TOOL;
+    const description = whole ? tool.description : clip(tool.description, 160);
     lines.push(`Tool ${tool.name}: ${description}${tool.inputSchema === undefined ? '' : ` ${JSON.stringify(tool.inputSchema)}`}`);
   }
   if ((prompt.tools ?? []).some((tool) => tool.name.startsWith('web.'))) {
