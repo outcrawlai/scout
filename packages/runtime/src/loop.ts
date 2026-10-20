@@ -6808,14 +6808,29 @@ function focusAfterClose(live: readonly TabInfo[], gone: TabId, openerOf: Readon
  * every later step failed `tab "t1" … is gone: closed-by-page` until the run
  * ended in error. The host leaves focus on a dead tab on purpose, so the move
  * is the loop's.
+ *
+ * `settle` waits up to its `ms` for the host to record the close. Used when the
+ * next step's own lock already failed on the tab: the session detaches before
+ * the host's tab list drops the tab, so one look can still find it open.
+ * Fleet 2026-10-20 05:38-05:46Z, Outcrawl Bench dev (venues-hold, n=3 of 3): a
+ * floor-plan popup posted the pick to its opener and closed itself ~200 ms
+ * after the click, the click's check read "nothing changed", and the next
+ * step's lock failed `Session with given id not found` 5-17 ms later; the run
+ * ended as a lost browser.
  */
 async function refocusAfterPageClose(
   control: TabControl | undefined,
   lastTab: TabId | undefined,
   openerOf: ReadonlyMap<TabId, TabId>,
+  settle?: { readonly clock: Clock; readonly ms: number },
 ): Promise<string | undefined> {
   if (control === undefined || lastTab === undefined) return undefined;
-  const live = await control.list();
+  let live = await control.list();
+  const settleUntil = settle === undefined ? 0 : settle.clock.now() + settle.ms;
+  while (settle !== undefined && live.some((tab) => tab.id === lastTab) && settle.clock.now() < settleUntil) {
+    await settle.clock.sleep(NEW_TAB_COMMIT_POLL_MS);
+    live = await control.list();
+  }
   if (live.some((tab) => tab.id === lastTab)) return undefined;
   const focus = focusAfterClose(live, lastTab, openerOf);
   if (focus === undefined) return undefined;
@@ -9238,6 +9253,8 @@ export async function runAgent<T = unknown>(
    * than the budget.
    */
   let stillLoadingRun = 0;
+  /** The step count at which a lock met a tab the page had closed: once per standing step, so a dying browser still ends. */
+  let lockMetClosedAt: number | undefined;
   /**
    * Every action-and-reference whose outcome has already been contradicted
    * once, so a repeat can be told from a first offence.
@@ -11519,16 +11536,14 @@ export async function runAgent<T = unknown>(
       }
     };
 
+    // The focused tab closed by the page since the last step: focus moves,
+    // and the model reads why. See `refocusAfterPageClose`.
+    // Only a step of this attempt (a resumed run's tabs were another
+    // browser's), and not one that closed its own tab.
+    const lastStep = steps.length > (req.resume?.steps.length ?? 0) ? steps.at(-1) : undefined;
+    const standingTab = lastStep === undefined || lastStep.action.type === 'closeTab' ? undefined : lastStep.tab;
     try {
-      // The focused tab closed by the page since the last step: focus moves,
-      // and the model reads why. See `refocusAfterPageClose`.
-      // Only a step of this attempt (a resumed run's tabs were another
-      // browser's), and not one that closed its own tab.
-      const lastStep = steps.length > (req.resume?.steps.length ?? 0) ? steps.at(-1) : undefined;
-      const closedBetween =
-        lastStep === undefined || lastStep.action.type === 'closeTab'
-          ? undefined
-          : await refocusAfterPageClose(deps.tabs, lastStep.tab, openerOf).catch(() => undefined);
+      const closedBetween = await refocusAfterPageClose(deps.tabs, standingTab, openerOf).catch(() => undefined);
       if (closedBetween !== undefined) momentNotice = momentNotice === undefined ? closedBetween : `${closedBetween} ${momentNotice}`;
       // A check the host can work and sees on the page is worked before the
       // page is read, and its outcome drained into this step by the first
@@ -13695,6 +13710,30 @@ export async function runAgent<T = unknown>(
         refusedInRow = 0;
         busySteps = 0;
         continue;
+      }
+      /**
+       * THE TAB THE RUN STOOD ON CLOSED ITSELF AFTER THE LAST STEP ENDED, and
+       * this step's lock met it before the host recorded the close: nothing
+       * was dispatched, so it is no step's action, and not a lost browser.
+       * Once the close is recorded the next pass moves focus and tells the
+       * model, as between any two steps. See {@link refocusAfterPageClose}
+       * (venues-hold, fleet 2026-10-20, n=3 of 3). A browser really gone
+       * leaves the tab listed, and is a lost browser below.
+       */
+      if (
+        dispatchedIn === undefined &&
+        lockMetClosedAt !== steps.length &&
+        cancelSignal?.aborted !== true &&
+        (isBrowserLost(error) || TAB_WENT_AWAY.test(errorMessage(error)))
+      ) {
+        lockMetClosedAt = steps.length;
+        const closedBefore = await refocusAfterPageClose(deps.tabs, standingTab, openerOf, { clock, ms: CLOSED_TAB_SETTLE_MS }).catch(() => undefined);
+        if (closedBefore !== undefined) {
+          failure = undefined;
+          // A model call made before the lock failed is the customer's: on the trace, not as a failure.
+          if (pending.modelRank !== undefined) record(traceOf(pending, index, clock.now() - stepStarted, isoTime(wallClock.now())));
+          continue;
+        }
       }
       failure = error instanceof SolveInProgressError ? VERIFICATION_IN_PROGRESS : errorMessage(error);
       // A step that failed and still began a download says so: the file is

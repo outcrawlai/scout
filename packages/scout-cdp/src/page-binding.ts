@@ -350,8 +350,8 @@ export function pageBinding(page: CdpPage, options: BindingOptions): AgentDeps {
 
   /** What this tab's top frame shows, for the two readers below. */
   const topFrame = topFrameWatch(page);
-  /** The PDF this tab is showing, when it shows one: see `./pdf-document.ts`. */
-  const pdf = pdfDocuments(page, topFrame);
+  /** The PDF this tab is showing, when it shows one, kept as a file when the host keeps them: see `./pdf-document.ts`. */
+  const pdf = pdfDocuments(page, topFrame, options.keepPdf);
   /** The large plain-text file this tab is showing, when it shows one: see `./text-document.ts`. */
   const textFile = textDocuments(page, topFrame);
 
@@ -1271,7 +1271,7 @@ export function pageBinding(page: CdpPage, options: BindingOptions): AgentDeps {
   async function withPdfNotice(tree: AxTree): Promise<AxTree> {
     const shown = await pdf.peek();
     if (shown === undefined) return tree;
-    const notice: AxNode = { ref: tree.root.ref, role: 'StaticText', name: pdfNotice(shown.read), xpath: '' };
+    const notice: AxNode = { ref: tree.root.ref, role: 'StaticText', name: pdfNotice(shown.read, shown.keptAs), xpath: '' };
     return { ...tree, root: { ...tree.root, children: [notice, ...(tree.root.children ?? [])] } };
   }
 

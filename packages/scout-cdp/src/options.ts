@@ -10,6 +10,7 @@ import type { FilePort } from './files';
 import type { CdpFlavor } from './flavor';
 import type { HandsPort } from './hands';
 import type { BindingHooks } from './hooks';
+import type { KeepPdf } from './pdf-document';
 import type { AgentTabs } from './tabs';
 
 export interface BindingOptions {
@@ -150,6 +151,13 @@ export interface BindingOptions {
    * on the page alone.
    */
   readonly downloads?: () => readonly DownloadStart[];
+  /**
+   * Keeps a PDF a tab opens in the browser's viewer as a file of the run,
+   * from the bytes the binding already reads for its text; nothing new is
+   * asked of the site. Absent, or answering `undefined`, the PDF is read but
+   * not kept, and the snapshot does not say it is. See `./pdf-document.ts`.
+   */
+  readonly keepPdf?: KeepPdf;
   /** Passed straight through to `AgentDeps.wallClock`. */
   readonly wallClock?: WallClock;
   /**

@@ -52,6 +52,16 @@
  * clock), and `extract` reads the text instead of the viewer's toolbar. The
  * snapshot carries one line saying the tab shows a PDF and that `extract`
  * reads it, because a model shown only a toolbar concludes the page is empty.
+ *
+ * A PDF in a tab is also a file the run was given: a run asked to return one
+ * delivered no file when the PDF opened in the viewer rather than downloading
+ * (Outcrawl Bench dev ob1-files-020, fleet 2026-10-20, n=3 of 3). So the same
+ * bytes are handed to the host's {@link KeepPdf} once per document, and the
+ * snapshot's line names the file it was kept as. Handed over once the read is
+ * final, not on a read that parsed `unreadable`: that is also what a truncated
+ * file looks like and is read again, and a truncated copy kept first would be
+ * the run's file. A PDF refused for any other reason (encrypted, say) is still a
+ * file, and is kept.
  */
 import { extractPdfText, type PdfRefusal } from '@outcrawl/scout-core';
 
@@ -109,6 +119,12 @@ export type PdfDocumentRead =
       readonly why: string;
     };
 
+/**
+ * Keeps a PDF document's bytes as a file of the run, from bytes already read:
+ * answers the name it is kept as, or `undefined` when it is not kept.
+ */
+export type KeepPdf = (file: { readonly url: string; readonly bytes: Uint8Array }) => string | undefined;
+
 /** The PDF a tab is showing, if it is showing one. */
 export interface PdfDocuments {
   /**
@@ -120,7 +136,7 @@ export interface PdfDocuments {
    * Whether the top document is a PDF, and its read if one has settled.
    * Starts the read and never waits for it: the snapshot asks this.
    */
-  peek(): Promise<{ readonly url: string; readonly read: PdfDocumentRead | undefined } | undefined>;
+  peek(): Promise<{ readonly url: string; readonly read: PdfDocumentRead | undefined; readonly keptAs?: string } | undefined>;
 }
 
 const REFUSALS: Readonly<Record<PdfRefusal, string>> = {
@@ -147,9 +163,11 @@ interface Reading {
   readonly earlier?: Settled;
 }
 
-/** Reads the PDF `page`'s top frame is showing, once per document. */
-export function pdfDocuments(page: CdpPage, watch: TopFrameWatch, deadlineMs = PDF_READ_DEADLINE_MS): PdfDocuments {
+/** Reads the PDF `page`'s top frame is showing, once per document, and hands its bytes to `keep` once. */
+export function pdfDocuments(page: CdpPage, watch: TopFrameWatch, keep?: KeepPdf, deadlineMs = PDF_READ_DEADLINE_MS): PdfDocuments {
   let reading: Reading | undefined;
+  /** The document whose bytes went to `keep`, and the name it was kept as, if it was. */
+  let handed: { readonly loaderId: string; readonly keptAs: string | undefined } | undefined;
 
   async function bytesOf(frame: TopFrame): Promise<{ readonly bytes: Uint8Array } | { readonly why: string }> {
     const reply = await topResource(page, frame);
@@ -166,9 +184,13 @@ export function pdfDocuments(page: CdpPage, watch: TopFrameWatch, deadlineMs = P
     const got = await bytesOf(frame);
     if ('why' in got) return { read: { outcome: 'unread', url: frame.url, why: got.why }, final: false };
     const parsed = extractPdfText(got.bytes);
+    // `unreadable` is also what a truncated file looks like, so it is tried again.
+    const final = parsed.ok || parsed.refusal !== 'unreadable';
+    if (final && keep !== undefined && handed?.loaderId !== frame.loaderId) {
+      handed = { loaderId: frame.loaderId, keptAs: keep({ url: frame.url, bytes: got.bytes }) };
+    }
     if (!parsed.ok) {
-      // `unreadable` is also what a truncated file looks like, so it is tried again.
-      return { read: { outcome: 'unread', url: frame.url, why: REFUSALS[parsed.refusal] }, final: parsed.refusal !== 'unreadable' };
+      return { read: { outcome: 'unread', url: frame.url, why: REFUSALS[parsed.refusal] }, final };
     }
     const { text, omittedChars } = cutAtLine(parsed.text, PDF_TEXT_MAX_CHARS);
     return {
@@ -223,25 +245,28 @@ export function pdfDocuments(page: CdpPage, watch: TopFrameWatch, deadlineMs = P
       const frame = await pdfTop(PDF_FRAME_READ_DEADLINE_MS);
       if (frame === undefined) return undefined;
       const entry = started(frame);
-      return { url: frame.url, read: (entry.settled ?? entry.earlier)?.read };
+      const keptAs = handed?.loaderId === frame.loaderId ? handed.keptAs : undefined;
+      return { url: frame.url, read: (entry.settled ?? entry.earlier)?.read, ...(keptAs === undefined ? {} : { keptAs }) };
     },
   };
 }
 
 /**
  * The snapshot's line for a PDF tab: what it is, how much text it holds, and
- * that `extract` reads it. `read` is `undefined` while the read is running.
+ * that `extract` reads it. `read` is `undefined` while the read is running;
+ * `keptAs` is the file name it was kept as with the run's downloads, if it was.
  */
-export function pdfNotice(read: PdfDocumentRead | undefined): string {
+export function pdfNotice(read: PdfDocumentRead | undefined, keptAs?: string): string {
+  const kept = keptAs === undefined ? '' : ` It is kept with this run's downloads as "${keptAs}".`;
   if (read?.outcome === 'unread') {
-    return `This tab shows a PDF document, and its text cannot be read: ${read.why}.`;
+    return `This tab shows a PDF document, and its text cannot be read: ${read.why}.${kept}`;
   }
   const size =
     read === undefined
       ? ''
       : `${read.title === undefined ? '' : ` "${read.title}"`}: ${read.pages.toLocaleString('en-US')} page${read.pages === 1 ? '' : 's'}, ` +
         `${(read.text.length + read.omittedChars).toLocaleString('en-US')} characters of text`;
-  return `This tab shows a PDF document${size}. Its text is not shown here; {"type":"extract"} reads it.`;
+  return `This tab shows a PDF document${size}. Its text is not shown here; {"type":"extract"} reads it.${kept}`;
 }
 
 /** What `extract` is given for a PDF tab: the document's text, introduced. */

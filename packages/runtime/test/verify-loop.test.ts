@@ -1102,4 +1102,89 @@ describe('a focused tab the page closes between steps', () => {
     expect(JSON.stringify(h.prompts[2])).toContain(`Tab ${popup} closed itself (by the page); t0 is focused now.`);
     expect(result.stopReason).toBe('task-complete');
   });
+
+  // venues-hold (fleet 2026-10-20 05:38-05:46Z, n=3 of 3): a floor-plan popup
+  // posted the pick to its opener and closed itself ~200 ms after the click,
+  // the click's check read "nothing changed", and the next step's lock failed
+  // `Session with given id not found` 5-17 ms later, before the host listed
+  // the tab gone. The run ended as a lost browser.
+  for (const closeRecordedAfterMs of [0, 300, 'never'] as const) {
+    test(`a lock that meets a closed tab the host records ${closeRecordedAfterMs === 'never' ? 'never is a lost browser' : `${String(closeRecordedAfterMs)} ms later is not a lost browser`}`, async () => {
+      let focused = 't0';
+      let popup = '';
+      let detached = false;
+      let closeRecordedAt: number | undefined;
+      const urls = new Map<string, string>([['t0', `${SITE}/apply`]]);
+      let control: NonNullable<AgentDeps['tabs']> | undefined;
+      const h: Harness = harness({
+        model: (_prompt, step) => ({ action: step === 0 ? { type: 'click', ref: CONTINUE } : step === 1 ? { type: 'click', ref: ALLOW } : DONE }),
+        tabs: [{ id: 't0', url: `${SITE}/apply` }],
+        tabTree: () => page(urls.get(focused) ?? `${SITE}/apply`),
+        // The worker's lock on a tab whose target is gone, whatever the tab list says yet.
+        lock: async () => {
+          if (detached && focused === popup) throw new Error('Outcrawl.lock failed (-32001): Session with given id not found.');
+        },
+        perform: async (action) => {
+          if (action.type !== 'click' || control === undefined) return;
+          if (action.ref === CONTINUE) {
+            const id = await control.open(`${SITE}/floorplan`);
+            popup = id;
+            urls.set(id, `${SITE}/floorplan`);
+            return;
+          }
+          // The pick is posted to the opener; the page itself does not change.
+        },
+      });
+      const tabs = h.deps.tabs;
+      if (tabs === undefined) throw new Error('the harness binds tabs');
+      control = {
+        ...tabs,
+        list: async () => {
+          if (closeRecordedAt !== undefined && h.clock.now() >= closeRecordedAt) {
+            closeRecordedAt = undefined;
+            await tabs.close(popup);
+          }
+          return (await tabs.list()).map((tab) => ({ ...tab, url: urls.get(tab.id) ?? tab.url, active: tab.id === focused }));
+        },
+        open: async (url: string) => {
+          const id = await tabs.open(url);
+          focused = id;
+          return id;
+        },
+        focus: async (id: string) => {
+          await tabs.focus(id);
+          focused = id;
+        },
+      };
+      const result = await runAgent(
+        { ...h.deps, tabs: control },
+        {
+          task: 'book the room',
+          caps: CAPS,
+          stepFailures: 3,
+          settle: false,
+          verify: true,
+          // The popup closes itself once the pick step is over; the host records it later.
+          onStep: (step) => {
+            if (step.index === 1) {
+              detached = true;
+              closeRecordedAt = closeRecordedAfterMs === 'never' ? undefined : h.clock.now() + closeRecordedAfterMs;
+            }
+          },
+        },
+      );
+
+      if (closeRecordedAfterMs === 'never') {
+        // A browser really gone leaves the tab listed: lost, once, not a loop.
+        expect(result.browserLost).toContain('Session with given id not found');
+        expect(result.stopReason).toBe('error');
+        return;
+      }
+      expect(result.browserLost).toBeUndefined();
+      expect(result.steps.map((step) => step.error)).toEqual([undefined, undefined, undefined]);
+      expect(result.steps).toHaveLength(3);
+      expect(JSON.stringify(h.prompts[2])).toContain(`Tab ${popup} closed itself (by the page); t0 is focused now.`);
+      expect(result.stopReason).toBe('task-complete');
+    });
+  }
 });
