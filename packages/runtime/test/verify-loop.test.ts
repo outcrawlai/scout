@@ -955,7 +955,7 @@ describe('a document link that opens a popup window', () => {
 
     expect(result.steps[0]?.error).toBeUndefined();
     expect(result.steps[0]?.check?.verdict).toBe('confirmed');
-    expect(result.steps[0]?.check?.saw).toContain('tab t1 closed after the action, and t0 is focused');
+    expect(result.steps[0]?.check?.saw).toContain('tab t1 closed itself (by the page) after the action, and t0 is focused');
     expect(result.steps[0]?.check?.saw).toContain('download of "Declaration documents.zip"');
     expect(result.steps[0]?.check?.saw).toContain('being saved for the person who started this run');
     expect(result.steps[0]?.tab).toBe('t0');
@@ -981,12 +981,29 @@ describe('a document link that opens a popup window', () => {
 
       expect(result.browserLost).toBeUndefined();
       expect(result.steps[0]?.error).toBeUndefined();
-      expect(result.steps[0]?.check?.saw).toContain('tab t1 closed after the action, and t0 is focused');
+      expect(result.steps[0]?.check?.saw).toContain('tab t1 closed itself (by the page) after the action, and t0 is focused');
       expect(result.steps[0]?.check?.saw).toContain('download of "Declaration documents.zip"');
       expect(result.steps[0]?.tab).toBe('t0');
       expect(result.stopReason).toBe('task-complete');
     });
   }
+
+  // library-tender-bid (fleet 2026-10-20 02:43Z, n=3 of 3): "Accept and
+  // continue" closes the popup and the step fails with the lock's own error,
+  // which reads as no lost browser, before the close is recorded.
+  test('a plain lock error on a popup that closes itself a moment later is the tab closing, not a failed step', async () => {
+    const { deps } = etenders({
+      start: { hashed: true, popupAt: popupFor('A'), focused: 't1' },
+      model: (step) => (step === 0 ? { type: 'click', ref: PROCEED } : DONE),
+      closeRecordedAfterMs: 600,
+    });
+    const result = await run(deps);
+
+    expect(result.steps[0]?.error).toBeUndefined();
+    expect(result.steps[0]?.check?.saw).toContain('tab t1 closed itself (by the page) after the action, and t0 is focused');
+    expect(result.steps[0]?.tab).toBe('t0');
+    expect(result.stopReason).toBe('task-complete');
+  });
 
   test('the same error with the tab still open is a lost browser, as before', async () => {
     const { deps } = etenders({
@@ -999,5 +1016,90 @@ describe('a document link that opens a popup window', () => {
 
     expect(result.browserLost).toContain('Session with given id not found');
     expect(result.stopReason).toBe('error');
+  });
+});
+
+describe('a focused tab the page closes between steps', () => {
+  // jobs-postwick (fleet 2026-10-20 02:43Z, n=2 of 3): the OAuth popup's
+  // "Allow" was confirmed, the popup closed itself after the step, and every
+  // later step failed `tab "t1" … is gone: closed-by-page` until the run ended.
+  const SITE = 'https://jobs.bench.example';
+  const CONTINUE = nodeRef(0, 61);
+  const ALLOW = nodeRef(0, 62);
+  const page = (url: string): AxTree =>
+    tree(
+      node({
+        role: 'RootWebArea',
+        name: url.includes('oauth') ? 'Postwick sign-in' : 'Jobs',
+        children: [
+          node({ role: 'button', name: 'Continue with Postwick', ref: CONTINUE }),
+          node({ role: 'button', name: 'Allow', ref: ALLOW }),
+        ],
+      }),
+      url,
+    );
+
+  test('focus moves to the opener, the model is told, and no step fails', async () => {
+    let focused = 't0';
+    let popup = '';
+    const urls = new Map<string, string>([['t0', `${SITE}/apply`]]);
+    let control: NonNullable<AgentDeps['tabs']> | undefined;
+    const h: Harness = harness({
+      model: (_prompt, step) => ({ action: step === 0 ? { type: 'click', ref: CONTINUE } : step === 1 ? { type: 'click', ref: ALLOW } : DONE }),
+      tabs: [{ id: 't0', url: `${SITE}/apply` }],
+      tabTree: () => page(urls.get(focused) ?? `${SITE}/apply`),
+      // The host refuses a lock on a focused tab that is gone, and leaves focus there.
+      lock: async () => {
+        if (!(await control?.list())?.some((tab) => tab.id === focused)) {
+          throw new Error(`tab "${focused}" (${urls.get(focused) ?? ''}) is gone: closed-by-page. It is not being replaced silently`);
+        }
+      },
+      perform: async (action) => {
+        if (action.type !== 'click' || control === undefined) return;
+        if (action.ref === CONTINUE) {
+          const id = await control.open(`${SITE}/mail/oauth/authorize`);
+          popup = id;
+          urls.set(id, `${SITE}/mail/oauth/authorize`);
+          await control.focus('t0');
+          return;
+        }
+        urls.set(focused, `${SITE}/mail/oauth/approve`);
+        return { url: `${SITE}/mail/oauth/approve` };
+      },
+    });
+    const tabs = h.deps.tabs;
+    if (tabs === undefined) throw new Error('the harness binds tabs');
+    control = {
+      ...tabs,
+      list: async () => (await tabs.list()).map((tab) => ({ ...tab, url: urls.get(tab.id) ?? tab.url, active: tab.id === focused })),
+      open: async (url: string) => {
+        const id = await tabs.open(url);
+        focused = id;
+        return id;
+      },
+      focus: async (id: string) => {
+        await tabs.focus(id);
+        focused = id;
+      },
+    };
+    const result = await runAgent(
+      { ...h.deps, tabs: control },
+      {
+        task: 'apply with Postwick',
+        caps: CAPS,
+        stepFailures: 0,
+        settle: false,
+        verify: true,
+        // The popup closes itself once the "Allow" step is over.
+        onStep: (step) => {
+          if (step.index === 1) void tabs.close(popup);
+        },
+      },
+    );
+
+    expect(result.steps.map((step) => step.error)).toEqual([undefined, undefined, undefined]);
+    expect(result.steps[1]?.tab).toBe(popup);
+    expect(JSON.stringify(h.prompts[2])).toContain(`Tab ${popup} closed itself (by the page); t0 is focused now.`);
+    expect(result.stopReason).toBe('task-complete');
   });
 });

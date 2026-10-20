@@ -6724,6 +6724,16 @@ const CLOSED_TAB_DOWNLOAD_WAIT_MS = 8_000;
  */
 const CLOSED_TAB_SETTLE_MS = 1_000;
 
+/**
+ * An error that names the step's tab going away, which a tab the page closed
+ * produces: a lock or unlock not answered, a session or target gone. Fleet
+ * 2026-10-20 02:43Z (Outcrawl Bench dev library-tender-bid, n=3 of 3): the
+ * terms popup's "Accept and continue" closed it, the step failed "Outcrawl.lock
+ * was not answered: the frame or tab it was sent to went away first", and the
+ * close was not yet recorded when it was looked for once.
+ */
+const TAB_WENT_AWAY = /Outcrawl\.(un)?lock|went away|is gone|session with given id not found|target closed|no target with given id/i;
+
 /** A step whose tab closed: the tab focused instead, and the check the step carries. */
 interface ClosedTab {
   readonly focus: TabId;
@@ -6763,8 +6773,7 @@ async function closedTabOutcome(options: {
     live = await control.list();
   }
   if (live.some((tab) => tab.id === dispatchedIn)) return undefined;
-  const opener = options.openerOf.get(dispatchedIn);
-  const focus = opener !== undefined && live.some((tab) => tab.id === opener) ? opener : live[0]?.id;
+  const focus = focusAfterClose(live, dispatchedIn, options.openerOf);
   if (focus === undefined) return undefined;
   await control.focus(focus);
   const begun = (): DownloadStart | undefined =>
@@ -6775,12 +6784,43 @@ async function closedTabOutcome(options: {
     await clock.sleep(DOWNLOAD_BEGIN_POLL_MS);
     found = begun();
   }
-  const saw = `tab ${dispatchedIn} closed after the action, and ${focus} is focused for the next step`;
+  const saw = `tab ${dispatchedIn} closed itself (by the page) after the action, and ${focus} is focused for the next step`;
   const base = { expected: options.expected, reads: 0, elapsedMs: 0 };
   return {
     focus,
     check: found === undefined ? { ...base, verdict: 'confirmed', saw } : { ...downloadCheck(base, found), saw: `${saw}; ${downloadSaw(found)}` },
   };
+}
+
+/** The tab focus goes to when the page closes `gone`: the tab that opened it, else the last tab still open. */
+function focusAfterClose(live: readonly TabInfo[], gone: TabId, openerOf: ReadonlyMap<TabId, TabId>): TabId | undefined {
+  const opener = openerOf.get(gone);
+  return opener !== undefined && live.some((tab) => tab.id === opener) ? opener : live.at(-1)?.id;
+}
+
+/**
+ * A focused tab the page closed BETWEEN steps, found before the next step
+ * touches it: focus moves to its opener (else the last tab open) and the
+ * model is told, so no step and no run fails for a tab the page closed.
+ *
+ * Fleet 2026-10-20 02:43Z, Outcrawl Bench dev (jobs-postwick, n=2 of 3): an
+ * OAuth popup's "Allow" was confirmed, the popup then closed itself, and
+ * every later step failed `tab "t1" … is gone: closed-by-page` until the run
+ * ended in error. The host leaves focus on a dead tab on purpose, so the move
+ * is the loop's.
+ */
+async function refocusAfterPageClose(
+  control: TabControl | undefined,
+  lastTab: TabId | undefined,
+  openerOf: ReadonlyMap<TabId, TabId>,
+): Promise<string | undefined> {
+  if (control === undefined || lastTab === undefined) return undefined;
+  const live = await control.list();
+  if (live.some((tab) => tab.id === lastTab)) return undefined;
+  const focus = focusAfterClose(live, lastTab, openerOf);
+  if (focus === undefined) return undefined;
+  await control.focus(focus);
+  return `Tab ${lastTab} closed itself (by the page); ${focus} is focused now.`;
 }
 
 /**
@@ -11480,6 +11520,16 @@ export async function runAgent<T = unknown>(
     };
 
     try {
+      // The focused tab closed by the page since the last step: focus moves,
+      // and the model reads why. See `refocusAfterPageClose`.
+      // Only a step of this attempt (a resumed run's tabs were another
+      // browser's), and not one that closed its own tab.
+      const lastStep = steps.length > (req.resume?.steps.length ?? 0) ? steps.at(-1) : undefined;
+      const closedBetween =
+        lastStep === undefined || lastStep.action.type === 'closeTab'
+          ? undefined
+          : await refocusAfterPageClose(deps.tabs, lastStep.tab, openerOf).catch(() => undefined);
+      if (closedBetween !== undefined) momentNotice = momentNotice === undefined ? closedBetween : `${closedBetween} ${momentNotice}`;
       // A check the host can work and sees on the page is worked before the
       // page is read, and its outcome drained into this step by the first
       // pass below: see `PageSession.workSightedCheck`.
@@ -13635,7 +13685,7 @@ export async function runAgent<T = unknown>(
        * focus on its opener, and is still a lost browser below.
        */
       const closed =
-        cancelSignal?.aborted === true ? undefined : await closedNow(isBrowserLost(error) ? CLOSED_TAB_SETTLE_MS : 0);
+        cancelSignal?.aborted === true ? undefined : await closedNow(isBrowserLost(error) || TAB_WENT_AWAY.test(errorMessage(error)) ? CLOSED_TAB_SETTLE_MS : 0);
       if (closed !== undefined) {
         failure = undefined;
         pending.check = closed.check;
