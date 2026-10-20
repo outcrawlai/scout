@@ -61,7 +61,7 @@ import { pdfDocuments, pdfMarkdown, pdfNotice } from './pdf-document';
 import { textDocumentMarkdown, textDocumentNotice, textDocumentWindow, textDocuments, type TextDocumentRead } from './text-document';
 import { topFrameWatch } from './top-frame';
 import { HIT_SAMPLES, HIT_WINDOW_PX, LANDING_DRAWS, LIST_OPTION_POLL_MS, LIST_OPTION_ROLES, LIST_OPTION_WAIT_MS, LIST_SELECT_SETTLE_MS, MAX_REACH_GESTURE_PX, MAX_REACH_TOTAL_PX, MAX_SCROLLS_TO_REACH, MIN_HITTABLE_PX, PAINTED_DESCENDANT_DEPTH, PAINTED_DESCENDANT_READS, PAINTED_RUN_STEPS, POINT_AIM_PX, REST_EPSILON_PX, SCROLL_PROGRESS_PX, SCROLL_REST_POLL_MS, SCROLL_REST_TIMEOUT_MS, TYPED_LIST_ROLES, normalisedName, textOutsideLists } from './reach';
-import { CLIPPING_SCROLLER, DISMISS_NAME, EDITABLE_FIELD_WIDTH, EDITABLE_FIELDS, EDITABLE_HOST, FIELD_VALUE, FILE_INPUT_NEAR, FIXED_OF, FOCUS_TAKES_TEXT, LABELLED_CONTROL_TYPES, MAX_DISMISS_CHECKS, MAX_DISMISS_NAMED, MAX_MIXED_LABEL_READS, MAX_NATIVE_DATE_READS, MODAL_OF, NATIVE_DATE_HOST, NATIVE_DATE_LAYOUT, SAME_CONTROL, SELECT_OF, VISIBLE_PART, asShown, clipFrom, nativeSelect, refusedSubmit, visibleFrom } from './scripts';
+import { CLIPPING_SCROLLER, DISMISS_NAME, EDITABLE_FIELD_WIDTH, EDITABLE_FIELDS, EDITABLE_HOST, FIELD_HAS_FOCUS, FIELD_VALUE, FILE_INPUT_NEAR, FIXED_OF, FOCUS_TAKES_TEXT, LABELLED_CONTROL_TYPES, MAX_DISMISS_CHECKS, MAX_DISMISS_NAMED, MAX_MIXED_LABEL_READS, MAX_NATIVE_DATE_READS, MODAL_OF, NATIVE_DATE_HOST, NATIVE_DATE_LAYOUT, SAME_CONTROL, SELECT_OF, VISIBLE_PART, asShown, clipFrom, nativeSelect, refusedSubmit, visibleFrom } from './scripts';
 
 /**
  * The `Outcrawl.getAXTree` node ceiling this binding asks for, well above the
@@ -3521,9 +3521,31 @@ export function pageBinding(page: CdpPage, options: BindingOptions): AgentDeps {
     // Backspace, which a person uses too, and typed once more. Only a native
     // text field that held text before is checked, so an empty field (nearly
     // every fill) costs one read.
-    if (before !== undefined && before !== '' && (await valueNow()) === before + text) {
+    let after = await valueNow();
+    if (before !== undefined && before !== '' && after === before + text) {
       await eraseLeft(before.length + text.length);
       await dispatchGesture(await hands.type(text, { replace: false }), session);
+      after = await valueNow();
+    }
+    // KEYS THAT WENT ELSEWHERE are a failed fill, said as one. Fleet
+    // 2026-10-20 (Outcrawl Bench dev venues-hold, n=3: run_722c543f,
+    // run_456e5cd8, run_74a3d5dd): a timed dialog opened while the event name
+    // was being typed, took the focus and the rest of the keys, and the field
+    // kept only the start of the name. The dialog hid the field from the
+    // tree, so the check could say no more than "cannot be read back", and
+    // all three bookings were saved with a cut-off name. Only when the field
+    // holds a strict start of the text AND has lost the focus: a field that
+    // formats, completes or limits what was typed keeps the focus.
+    if (after !== undefined && after !== text && text.startsWith(after) && frameId !== undefined) {
+      const focused = await inLookWorld(session, frameId, { on: id, declaration: FIELD_HAS_FOCUS, returns: 'value' }).catch(() => undefined);
+      if (focused === false) {
+        const held = text === written ? JSON.stringify(after) : `the first ${String(after.length)} characters`;
+        throw new Error(
+          `fill: the field holds ${held}, ${String(after.length)} of the ${String(text.length)} characters written: the focus ` +
+            'left the field while typing (a dialog or another element took it), and the rest of the keys went there. ' +
+            'Deal with what took the focus, then fill the field again.',
+        );
+      }
     }
 
     /** Backspace `count` times (a value: its length), the caret at the end of the field. */

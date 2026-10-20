@@ -118,6 +118,19 @@ export const FIELD_VALUE = `function () {
 }`;
 
 /**
+ * Whether `this` still has the keyboard focus, looking through open shadow
+ * roots: `false` once a dialog, a popup or the page's own script moved focus
+ * elsewhere. Read after a `fill` whose field did not end up holding the text.
+ */
+export const FIELD_HAS_FOCUS = `function () {
+  var focused = this.ownerDocument.activeElement;
+  for (var hops = 0; focused !== null && focused !== this && focused.shadowRoot && focused.shadowRoot.activeElement && hops < 32; hops += 1) {
+    focused = focused.shadowRoot.activeElement;
+  }
+  return focused === this;
+}`;
+
+/**
  * One native `<select>` choice, worked out and made in the LOOK WORLD, where
  * the page's own script sees none of it. `this` is the select or one of its
  * options. The option is matched by `value`, then by the label a person

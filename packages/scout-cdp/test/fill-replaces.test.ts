@@ -11,13 +11,13 @@ import { describe, expect, test } from 'bun:test';
 import { nodeRef } from '@outcrawl/runtime';
 
 import { bindAgent, type CdpFlavor, type CdpPage, type HandsPort, type HandsStep } from '../src/index';
-import { FIELD_VALUE, FOCUS_TAKES_TEXT } from '../src/scripts';
+import { FIELD_HAS_FOCUS, FIELD_VALUE, FOCUS_TAKES_TEXT } from '../src/scripts';
 
 const FIELD = nodeRef(0, 7);
 
 /** One text input on a page. `selectAllSelects: false` is the failure: the chord selects nothing. */
-function fieldPage(initial: string, options: { readonly selectAllSelects: boolean }) {
-  const field = { value: initial, selected: false };
+function fieldPage(initial: string, options: { readonly selectAllSelects: boolean; readonly focusLostAt?: number; readonly maxLength?: number }) {
+  const field = { value: initial, selected: false, focused: true };
   const keys: string[] = [];
   const reply = (method: string, params: Record<string, unknown>): Record<string, unknown> => {
     switch (method) {
@@ -34,6 +34,7 @@ function fieldPage(initial: string, options: { readonly selectAllSelects: boolea
       case 'Runtime.callFunctionOn':
         if (params['functionDeclaration'] === FOCUS_TAKES_TEXT) return { result: { value: 'text' } };
         if (params['functionDeclaration'] === FIELD_VALUE) return { result: { value: field.value } };
+        if (params['functionDeclaration'] === FIELD_HAS_FOCUS) return { result: { value: field.focused } };
         return { result: {} };
       case 'Input.dispatchKeyEvent': {
         const commands = params['commands'];
@@ -42,7 +43,17 @@ function fieldPage(initial: string, options: { readonly selectAllSelects: boolea
           field.selected = options.selectAllSelects && field.value !== '';
         } else if (typeof params['text'] === 'string') {
           keys.push(`type ${params['text']}`);
-          field.value = field.selected ? params['text'] : field.value + params['text'];
+          if (!field.focused) return {};
+          let typed = params['text'];
+          // A dialog opens once the field holds `focusLostAt` characters, and takes the rest.
+          if (options.focusLostAt !== undefined) {
+            const room = options.focusLostAt - (field.selected ? 0 : field.value.length);
+            if (typed.length >= room) {
+              typed = typed.slice(0, Math.max(0, room));
+              field.focused = false;
+            }
+          }
+          field.value = (field.selected ? typed : field.value + typed).slice(0, options.maxLength);
           field.selected = false;
         } else {
           keys.push(String(params['key']));
@@ -129,4 +140,21 @@ describe('an empty fill clears the field', () => {
       expect(field.value).toBe('');
     });
   }
+});
+
+// venues-hold (fleet 2026-10-20, n=3): a timed dialog opened mid-typing and
+// took the rest of the keys; the booking was saved with a cut-off name.
+describe('a fill whose keys went elsewhere fails, and says so', () => {
+  test('the field keeps the start of the text and has lost the focus', async () => {
+    const { page } = fieldPage('', { selectAllSelects: true, focusLostAt: 38 });
+    const filled = bound(page).perform({ type: 'fill', ref: FIELD, text: 'Hollinbridge Camera Club members social' });
+    await expect(filled).rejects.toThrow('the field holds "Hollinbridge Camera Club members socia", 38 of the 39 characters');
+    await expect(filled).rejects.toThrow('the focus left the field while typing');
+  });
+
+  test('a field that cuts the text but keeps the focus, as a length limit does, is not refused', async () => {
+    const limited = fieldPage('', { selectAllSelects: true, maxLength: 10 });
+    await bound(limited.page).perform({ type: 'fill', ref: FIELD, text: 'Hollinbridge Camera Club' });
+    expect(limited.field.value).toBe('Hollinbrid');
+  });
 });
