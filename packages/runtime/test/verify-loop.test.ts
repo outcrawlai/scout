@@ -859,6 +859,10 @@ describe('a document link that opens a popup window', () => {
     readonly model: (step: number) => Action;
     readonly start?: { readonly hashed: boolean; readonly popupAt?: string; readonly focused?: 't0' | 't1' };
     readonly lateMs?: number;
+    /** PROCEED's error: the fleet worker's, which reads as a lost browser. */
+    readonly proceedError?: string;
+    /** How long after the throw the host records the popup closed; `never`: it stays (a browser really lost). */
+    readonly closeRecordedAfterMs?: number | 'never';
   }): { readonly h: Harness; readonly deps: AgentDeps } {
     let hashed = options.start?.hashed ?? false;
     const urls = new Map<string, string>();
@@ -867,6 +871,7 @@ describe('a document link that opens a popup window', () => {
     if (options.start?.popupAt !== undefined) startTabs.push({ id: 't1', url: options.start.popupAt });
     if (options.start?.focused === 't1') startTabs.reverse();
     let control: AgentDeps['tabs'];
+    let closeAt: number | undefined;
     const h: Harness = harness({
       model: (_prompt, step) => ({ action: options.model(step) }),
       tabs: startTabs,
@@ -874,9 +879,11 @@ describe('a document link that opens a popup window', () => {
       perform: async (action) => {
         if (action.type !== 'click' || control === undefined) return;
         if (action.ref === PROCEED) {
-          await control.close('t1');
+          const recorded = options.closeRecordedAfterMs ?? 0;
+          if (recorded === 0) await control.close('t1');
+          else if (recorded !== 'never') closeAt = h.clock.now() + recorded;
           begun.push({ at: h.clock.now() + (options.lateMs ?? 1_500), download: { id: 'guid-1', tab: 't0', url: popupFor('A'), filename: 'Declaration documents.zip', saved: true } });
-          throw new Error("Outcrawl.lock was not answered: the frame or tab it was sent to went away first");
+          throw new Error(options.proceedError ?? 'Outcrawl.lock was not answered: the frame or tab it was sent to went away first');
         }
         const target = popupFor(action.ref === DOC_A ? 'A' : 'B');
         hashed = true;
@@ -896,7 +903,13 @@ describe('a document link that opens a popup window', () => {
     for (const tab of startTabs) if (tab.id !== 't0') urls.set(tab.id, tab.url);
     control = {
       ...tabs,
-      list: async () => (await tabs.list()).map((tab) => ({ ...tab, url: urls.get(tab.id) ?? tab.url })),
+      list: async () => {
+        if (closeAt !== undefined && h.clock.now() >= closeAt) {
+          closeAt = undefined;
+          await tabs.close('t1');
+        }
+        return (await tabs.list()).map((tab) => ({ ...tab, url: urls.get(tab.id) ?? tab.url }));
+      },
     };
     const deps: AgentDeps = {
       ...h.deps,
@@ -947,5 +960,44 @@ describe('a document link that opens a popup window', () => {
     expect(result.steps[0]?.check?.saw).toContain('being saved for the person who started this run');
     expect(result.steps[0]?.tab).toBe('t0');
     expect(result.stopReason).toBe('task-complete');
+  });
+
+  // The fleet worker's own error for that click (2026-10-19 23:44Z,
+  // run_5ff6ed60): it reads as a lost browser, and the host records the
+  // popup's close around the same moment, in either order.
+  const WORKER_LOCK_ERROR =
+    'Outcrawl.lock was not answered: the frame or tab it was sent to went away first; whether it took effect before then is ' +
+    'unknown; Outcrawl.unlock failed (-32001): Session with given id not found.';
+
+  for (const closeRecordedAfterMs of [0, 600]) {
+    test(`the worker's lock error on a self-closing popup is the tab closing, not a lost browser (close recorded ${String(closeRecordedAfterMs)} ms later)`, async () => {
+      const { deps } = etenders({
+        start: { hashed: true, popupAt: popupFor('A'), focused: 't1' },
+        model: (step) => (step === 0 ? { type: 'click', ref: PROCEED } : DONE),
+        proceedError: WORKER_LOCK_ERROR,
+        closeRecordedAfterMs,
+      });
+      const result = await run(deps);
+
+      expect(result.browserLost).toBeUndefined();
+      expect(result.steps[0]?.error).toBeUndefined();
+      expect(result.steps[0]?.check?.saw).toContain('tab t1 closed after the action, and t0 is focused');
+      expect(result.steps[0]?.check?.saw).toContain('download of "Declaration documents.zip"');
+      expect(result.steps[0]?.tab).toBe('t0');
+      expect(result.stopReason).toBe('task-complete');
+    });
+  }
+
+  test('the same error with the tab still open is a lost browser, as before', async () => {
+    const { deps } = etenders({
+      start: { hashed: true, popupAt: popupFor('A'), focused: 't1' },
+      model: (step) => (step === 0 ? { type: 'click', ref: PROCEED } : DONE),
+      proceedError: WORKER_LOCK_ERROR,
+      closeRecordedAfterMs: 'never',
+    });
+    const result = await run(deps);
+
+    expect(result.browserLost).toContain('Session with given id not found');
+    expect(result.stopReason).toBe('error');
   });
 });

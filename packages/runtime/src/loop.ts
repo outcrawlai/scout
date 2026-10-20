@@ -6673,6 +6673,17 @@ function downloadNote(readDownloads: (() => readonly DownloadStart[]) | undefine
  */
 const CLOSED_TAB_DOWNLOAD_WAIT_MS = 8_000;
 
+/**
+ * How long a step whose error reads as a lost browser waits for its own tab to
+ * be recorded closed before the error is believed. A popup's `window.close()`
+ * kills the session the step's lock is on, so the lock answers "Session with
+ * given id not found" (a lost-browser phrase) about the same moment the host
+ * hears the target was destroyed, in either order. Fleet 2026-10-19 23:44Z
+ * (run_5ff6ed60, n=1): `tab.lost` closed-by-page at :53.149 and the step's
+ * error at :54.471. Not measured: how late the destroy can trail the error.
+ */
+const CLOSED_TAB_SETTLE_MS = 1_000;
+
 /** A step whose tab closed: the tab focused instead, and the check the step carries. */
 interface ClosedTab {
   readonly focus: TabId;
@@ -6700,10 +6711,17 @@ async function closedTabOutcome(options: {
   readonly openerOf: ReadonlyMap<TabId, TabId>;
   readonly expected: string;
   readonly clock: Clock;
+  /** How long to wait for the tab to be recorded closed; 0 looks once. */
+  readonly settleMs?: number;
 }): Promise<ClosedTab | undefined> {
   const { control, readDownloads, watch, dispatchedIn, clock } = options;
   if (control === undefined || dispatchedIn === undefined) return undefined;
-  const live = await control.list();
+  let live = await control.list();
+  const settleUntil = clock.now() + (options.settleMs ?? 0);
+  while (live.some((tab) => tab.id === dispatchedIn) && clock.now() < settleUntil) {
+    await clock.sleep(NEW_TAB_COMMIT_POLL_MS);
+    live = await control.list();
+  }
   if (live.some((tab) => tab.id === dispatchedIn)) return undefined;
   const opener = options.openerOf.get(dispatchedIn);
   const focus = opener !== undefined && live.some((tab) => tab.id === opener) ? opener : live[0]?.id;
@@ -11377,9 +11395,14 @@ export async function runAgent<T = unknown>(
      * closed it ({@link closedTabOutcome}).
      */
     let dispatchedIn: { readonly tab: TabId; readonly urls: ReadonlyMap<TabId, string> } | undefined;
-    /** This step's tab closing, once found: see {@link closedTabOutcome}. Not memoized while the tab still lives. */
+    /**
+     * This step's tab closing, once found: see {@link closedTabOutcome}. Not
+     * memoized while the tab still lives. `settleMs` waits for the close to
+     * be recorded (an error that reads as a lost browser); a focus that fails
+     * means the connection is gone after all, and nothing is found.
+     */
     let tabClosed: ClosedTab | undefined;
-    const closedNow = async (): Promise<ClosedTab | undefined> =>
+    const closedNow = async (settleMs = 0): Promise<ClosedTab | undefined> =>
       (tabClosed ??= await closedTabOutcome({
         control: deps.tabs,
         readDownloads: deps.downloads,
@@ -11388,6 +11411,7 @@ export async function runAgent<T = unknown>(
         openerOf,
         expected: describeAction(pending.action),
         clock,
+        settleMs,
       }).catch(() => undefined));
     /** The url the previous step left the page on, where a solve's submit departs from. */
     const departFrom = standingUrl;
@@ -13546,8 +13570,17 @@ export async function runAgent<T = unknown>(
        * click): whatever the host then threw about the tab, the step did what
        * the page asked of it. Recorded with its check, not as a failure, and
        * not charged. See {@link closedTabOutcome}.
+       *
+       * ALSO when the throw reads as a lost browser: the lock on a tab that
+       * closed itself answers "Session with given id not found". Fleet
+       * 2026-10-19 23:44Z (run_5ff6ed60, run_9b7cb926): that was taken for a
+       * dead browser, the context was thrown away with the download its opener
+       * had just begun, and every resume did the same. A browser really gone
+       * leaves the step's tab listed (nothing recorded it closing) or fails the
+       * focus on its opener, and is still a lost browser below.
        */
-      const closed = cancelSignal?.aborted === true || isBrowserLost(error) ? undefined : await closedNow();
+      const closed =
+        cancelSignal?.aborted === true ? undefined : await closedNow(isBrowserLost(error) ? CLOSED_TAB_SETTLE_MS : 0);
       if (closed !== undefined) {
         failure = undefined;
         pending.check = closed.check;
