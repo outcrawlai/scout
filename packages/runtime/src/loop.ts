@@ -4367,6 +4367,61 @@ function stalledReloadNotice(step: number, report: SettleReport): string {
 }
 
 /**
+ * A GUEST SENT TO SIGN IN, AND BACK: how many times per run the host loads a
+ * page again that the site answered with its sign-in page instead.
+ *
+ * MEASURED (fleet sessions through the worker's own CDP client, a large
+ * shopping site's guest search by url, no account): 2026-10-19, 16 sessions
+ * that loaded a bounced search again 10-20 s later were let through within
+ * three loads in 15 (to a picture check, and after a passed check to the
+ * results as a guest). 2026-10-20, 7-25 s apart: let through within three
+ * loads in 12 of 16 bounced sessions; 2 of those 12 went straight to the
+ * results. The model, shown the sign-in page, gave up in 10 of 10 dev runs
+ * (it is told to sign in only with credentials the task gives). So the host
+ * loads it again itself: no model call, three times at most. A client that
+ * sent `Runtime.enable` was let through in 0 of 11 sessions.
+ */
+export const GUEST_BOUNCE_RETRIES = 3;
+
+/** A url path segment that names a sign-in or sign-up page (`/login.html`, `/ap/signin`, `/authwall`). */
+const SIGN_IN_SEGMENT = /^(?:log-?in|sign-?in|sign_in|sign-?up|register|registration|authwall|sso|passport)$/i;
+
+/**
+ * The page a sign-in page says it will return to, when that page is exactly
+ * `requested`: the site answered a load of `requested` with its sign-in page,
+ * naming the requested page in its query (`from=`, `redirect=`, `next=`, any
+ * key). `undefined` for every other page, so a sign-in page the run went to
+ * itself, or one that returns somewhere else, is the model's to read.
+ */
+export function guestBounceReturn(requested: string, landed: string): string | undefined {
+  if (!URL.canParse(requested) || !URL.canParse(landed)) return undefined;
+  const want = new URL(requested);
+  const at = new URL(landed);
+  const signIn = (url: URL): boolean => url.pathname.split('/').some((part) => SIGN_IN_SEGMENT.test(part.replace(/\.[a-z]+$/i, '')));
+  if (!signIn(at) || signIn(want) || want.href === at.href) return undefined;
+  for (const value of at.searchParams.values()) {
+    if (!URL.canParse(value, at.href)) continue;
+    const back = new URL(value, at);
+    if (back.href === want.href) return want.href;
+  }
+  return undefined;
+}
+
+/** The step reason on the host's load after a guest bounce: the host's step, so it says whose decision it was. */
+const GUEST_BOUNCE_REASON =
+  'loaded again by the host: the site answered this page with its sign-in page, which names this page as ' +
+  'the one to return to; such a site often lets a guest through on a later load, sometimes after a picture check.';
+
+/** The one-moment notice after the host's load, on the model's next prompt (see {@link GUEST_BOUNCE_RETRIES}). */
+function guestBounceNotice(step: number, attempt: number): string {
+  return (
+    `Step ${String(step)} was taken for you: the site had sent the page you opened to its sign-in page, so the ` +
+    `page was loaded again (${String(attempt)} of ${String(GUEST_BOUNCE_RETRIES)}). The page below is the result.` +
+    (attempt >= GUEST_BOUNCE_RETRIES ? ' It will not be loaded again automatically.' : '')
+  );
+}
+
+/**
  * A task that asks for, or allows, values nobody supplied. Lenient on purpose:
  * a task this lets through gets the behaviour every run had before the gate.
  */
@@ -9852,6 +9907,28 @@ export async function runAgent<T = unknown>(
     momentNotice = stalledReloadNotice(step, report);
     return { action: { type: 'navigate', url: shown.url }, reason: STALLED_RELOAD_REASON };
   };
+  /** How many times the host has loaded each url again after a guest bounce. See `guestBounce`. */
+  const guestBounces = new Map<string, number>();
+  /**
+   * THE HOST LOADS A PAGE AGAIN THAT THE SITE SENT TO ITS SIGN-IN PAGE, up to
+   * {@link GUEST_BOUNCE_RETRIES} times per url per run, or `undefined` for the
+   * model's step. Only when the step just taken loaded that url (the model's
+   * navigate or the host's own), and the sign-in page names exactly it as the
+   * page to return to (`guestBounceReturn`): a sign-in the run went to, or a
+   * form it submitted, is never re-sent.
+   */
+  const guestBounce = (shown: AxTree, step: number): { readonly action: Action; readonly reason: string; readonly usage?: Usage } | undefined => {
+    const last = steps.at(-1)?.action;
+    if (last?.type !== 'navigate') return undefined;
+    const back = guestBounceReturn(last.url, shown.url);
+    if (back === undefined) return undefined;
+    const tries = (guestBounces.get(back) ?? 0) + 1;
+    if (tries > GUEST_BOUNCE_RETRIES) return undefined;
+    guestBounces.set(back, tries);
+    quiescentAt = undefined;
+    momentNotice = guestBounceNotice(step, tries);
+    return { action: { type: 'navigate', url: last.url }, reason: GUEST_BOUNCE_REASON };
+  };
   /**
    * Every extraction this step whose page was cut, head and fan alike, for
    * the next prompt and then consumed like {@link looked}. See
@@ -11826,10 +11903,12 @@ export async function runAgent<T = unknown>(
             // the model (an unreadable image) is on this step's prompt. An
             // action refused mid-solve is resent first: see `resendRefused`. A
             // document that stalled is reloaded before anything is asked of
-            // it: see `stalledReload`.
+            // it: see `stalledReload`. A page the site sent to its sign-in
+            // page is loaded again: see `guestBounce`.
             const host =
               resendRefused(shown, verificationSolved) ??
               stalledReload(shown, unrendered, index) ??
+              guestBounce(shown, index) ??
               (await textCaptchaStep(shown, raw));
             const notices = [
               // THE PAGE FACT FIRST, and the challenge before the render wait:
