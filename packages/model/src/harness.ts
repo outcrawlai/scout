@@ -155,6 +155,7 @@ import {
   refIndex,
   onThisPageNow,
   repeatedActions,
+  retryableFills,
   retryableNavigations,
   redirectedSite,
   searchedBefore,
@@ -1415,6 +1416,9 @@ export class HarnessModelPort implements ModelPort {
       ),
       ...retryableNavigations(prompt.history).map(
         (key) => `TIMED OUT once: ${key} — one exact retry is reasonable; only a second identical failure rules it out.`,
+      ),
+      ...retryableFills(prompt.history).map(
+        (key) => `MISTYPED once: ${key} — the field does not hold the text; fill it again with the same text (a fill replaces what the field holds).`,
       ),
       ...repeatedPlaces(prompt.history),
       ...[redirectedSite(prompt.history, prompt.tree.url)].filter((line): line is string => line !== undefined),

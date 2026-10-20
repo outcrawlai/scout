@@ -9,7 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Clock } from '@outcrawl/scout-core';
 import { CODE_RUN_TOOL, CODE_RUN_TOOL_DESCRIPTION, INBOX_SIGNUP_RULE, PAGE_SCRIPT_REPLY_MAX_CHARS, PAGE_SCRIPT_TOOL, PAGE_SCRIPT_TOOL_DESCRIPTION, codeRunToolPort, codeRunTools, hashSnapshot, nodeRef, pageScriptTools, renderPrompt, type AgentPrompt, type AxNode, type AxTree, type StepTrace, type ToolCallEcho } from '@outcrawl/runtime';
 
-import { BRAIN_BUDGET, BRAIN_SCHEMA, BRAIN_SYSTEM_PROMPT, BrainThread, actionKey, repeatedActions, traceLine, retryableNavigations, alreadyRead, reloadAsNavigate, briefElements, briefFacts, rankedReadGap, rawBrief, readBrief, readDecision, reconciledNavigate, redirectedSite, searchedBefore, selectBrief as selectBriefWithRefs, directAction, threadReply, unconfirmedSlot, wholeRead, wrongListItem, readWithConditions, comboboxMiss, factsBesideReads, listingVerdicts, toolReplies } from '../src/brain';
+import { BRAIN_BUDGET, BRAIN_SCHEMA, BRAIN_SYSTEM_PROMPT, BrainThread, actionKey, repeatedActions, retryableFills, traceLine, retryableNavigations, alreadyRead, reloadAsNavigate, briefElements, briefFacts, rankedReadGap, rawBrief, readBrief, readDecision, reconciledNavigate, redirectedSite, searchedBefore, selectBrief as selectBriefWithRefs, directAction, threadReply, unconfirmedSlot, wholeRead, wrongListItem, readWithConditions, comboboxMiss, factsBesideReads, listingVerdicts, toolReplies } from '../src/brain';
 import { HarnessModelPort, type ModelPlan } from '../src/harness';
 import { ModelClient } from '../src/client';
 import { CostLedger } from '../src/ledger';
@@ -2669,6 +2669,21 @@ describe('a fill the page interrupted', () => {
     expect(repeatedActions([fill(0, ERROR)]).size).toBe(0);
     expect(repeatedActions([fill(0, ERROR), fill(1, ERROR)]).get('fill 350-1240')?.failed).toBe(true);
     expect(repeatedActions([fill(0, 'fill: no such element')]).get('fill 350-1240')?.failed).toBe(true);
+  });
+
+  // run_182b17aa: the dialog took keys from the middle, the field kept the
+  // focus and read "…Dramaociety…"; the guard said "take a different route".
+  test('a field that holds other text is open to one refill, and the brain is told; a field that stayed empty is not', () => {
+    const misread = (index: number, saw: string): StepTrace =>
+      ({ ...fill(index), check: { verdict: 'contradicted', saw, expected: '', reads: 1, elapsedMs: 0 } }) as unknown as StepTrace;
+    const wrong = misread(0, `the field reads "Hollinbridge Amateur Dramaociety", not "${TEXT}"`);
+    expect(repeatedActions([wrong]).size).toBe(0);
+    expect(retryableFills([wrong])).toEqual(['fill 350-1240']);
+    expect(repeatedActions([wrong, { ...wrong, index: 1 }]).get('fill 350-1240')?.failed).toBe(true);
+    expect(retryableFills([wrong, { ...wrong, index: 1 }])).toEqual([]);
+    const empty = misread(0, 'the field is still empty: what was typed did not land in it');
+    expect(repeatedActions([empty]).get('fill 350-1240')?.failed).toBe(true);
+    expect(retryableFills([empty])).toEqual([]);
   });
 
   test("its step line keeps the error whole and shortens the action instead, at the brain's line lengths", () => {

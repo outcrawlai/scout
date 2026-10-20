@@ -2974,7 +2974,7 @@ export function repeatedActions(
     const key = actionKey(trace.action);
     if (key === undefined) continue;
     const seen = counts.get(key);
-    const transient = transientNavFailure(trace) || interruptedFill(trace);
+    const transient = transientNavFailure(trace) || retryableFill(trace);
     const failed = !transient && (trace.error !== undefined || trace.check?.verdict === 'contradicted');
     const times = (seen?.transient ?? 0) + (transient ? 1 : 0);
     counts.set(key, { text: key, count: (seen?.count ?? 0) + 1, failed: (seen?.failed ?? false) || failed || times >= 2, transient: times });
@@ -3053,15 +3053,37 @@ export function transientNavFailure(trace: StepTrace): boolean {
 }
 
 /**
- * Whether a step is a fill the page interrupted: the focus left the field
- * while it was typed (`performFill` in `@outcrawl/scout-cdp` says so in these
- * words), so only the start of the text landed. Not the fill's fault, so ONE
- * exact retry is open, as for a navigate that timed out. Fleet 2026-10-20
- * (Outcrawl Bench dev venues-hold, run_7f096ca5): the fill was told to run
- * again, and the repeat guard would have refused it as already failed.
+ * Whether a step is a fill that ONE exact retry can put right, because a fill
+ * replaces what the field holds: the page interrupted it (the focus left the
+ * field while it was typed, as `performFill` in `@outcrawl/scout-cdp` says in
+ * these words), or the field ended holding other text than was typed. A field
+ * that stayed empty is not one: it may not take typing at all.
+ *
+ * Fleet 2026-10-20, Outcrawl Bench dev venues-hold: a timed dialog took keys
+ * from the event name. run_7f096ca5: the fill was told to run again and the
+ * repeat guard would have refused it. run_182b17aa: the field read
+ * "…Dramaociety…", the guard said "take a different route", and the run spent
+ * its no-effect allowance on a click and Ctrl+A in the field and stopped.
  */
-export function interruptedFill(trace: StepTrace): boolean {
-  return trace.action.type === 'fill' && trace.error !== undefined && /focus left the field while typing/.test(trace.error);
+export function retryableFill(trace: StepTrace): boolean {
+  if (trace.action.type !== 'fill') return false;
+  if (trace.error !== undefined) return /focus left the field while typing/.test(trace.error);
+  return trace.check?.verdict === 'contradicted' && /^the field reads ".+", not "/.test(trace.check.saw);
+}
+
+/**
+ * Fills in the repeat window that {@link retryableFill} says one retry can put
+ * right, and that were not run again. The port says so to the brain.
+ */
+export function retryableFills(history: readonly StepTrace[]): readonly string[] {
+  const window = history.slice(-REPEAT_WINDOW);
+  const keys: string[] = [];
+  for (const trace of window) {
+    const key = actionKey(trace.action);
+    if (key === undefined || !retryableFill(trace)) continue;
+    if (window.filter((other) => actionKey(other.action) === key).length === 1) keys.push(key);
+  }
+  return keys;
 }
 
 /**
