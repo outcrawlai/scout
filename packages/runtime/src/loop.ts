@@ -3540,7 +3540,8 @@ const CREATE_FILE_RULE =
   '.json or .html holds your text as written; .pdf makes a one-page PDF printing the text; .png ' +
   'makes a plain placeholder image. It is listed below by handle on the next step, and you then ' +
   'attach it with attachFile. Create a file only for an upload the task needs, never to store ' +
-  'notes or findings.';
+  'notes or findings, and never in place of a file the task gives or the run downloaded: download that one ' +
+  'and attach it by its name.';
 
 /**
  * Added only when the run has a purchases port, for `TAB_GRAMMAR`'s reason: a
@@ -3791,6 +3792,45 @@ export function heldFileAction(action: Action, manifest: readonly RunFile[]): Ac
   }
   const [held] = named;
   return held === undefined ? action : { ...action, file: held.fileId };
+}
+
+/**
+ * The file the run was GIVEN that `name` would stand in for, or `undefined`.
+ *
+ * createFile is for content the model writes itself. Fleet 2026-10-20
+ * (Outcrawl Bench jobs-apply, 3 of 3 dev runs and 1 test run): the task gave
+ * a CV by URL, attaching it by name failed, and the run created "cv.pdf" from
+ * a sentence and attached that; the site got 582 bytes for a 2,122-byte file.
+ *
+ * Matched on the whole name or on its stem, case-insensitive ("CV" is
+ * "cv.pdf"): a file the run holds that it did not create, a file its browser
+ * began downloading, or the last segment of a URL in the task that names a
+ * file (has an extension).
+ */
+export function givenFileNamed(
+  name: string,
+  task: string,
+  manifest: readonly RunFile[],
+  created: ReadonlySet<string>,
+  downloads: readonly DownloadStart[],
+): { readonly name: string; readonly source: string; readonly held: boolean } | undefined {
+  const stem = (file: string): string => file.trim().toLowerCase().replace(/\.[a-z0-9]{1,8}$/u, '');
+  const same = (other: string): boolean => other.trim().toLowerCase() === name.trim().toLowerCase() || stem(other) === stem(name);
+  if (stem(name) === '') return undefined;
+  const held = manifest.find((file) => !created.has(file.fileId) && same(file.name));
+  if (held !== undefined) return { name: held.name, source: 'this run already holds', held: true };
+  const downloaded = downloads.find((download) => download.filename !== '' && same(download.filename));
+  if (downloaded !== undefined) return { name: downloaded.filename, source: 'this run downloaded', held: false };
+  for (const match of task.matchAll(/https?:\/\/[^\s<>"'`)\]]+/giu)) {
+    let segment: string;
+    try {
+      segment = decodeURIComponent(new URL(match[0].replace(/[.,;:!?]+$/u, '')).pathname.split('/').pop() ?? '');
+    } catch {
+      continue;
+    }
+    if (/\.[A-Za-z0-9]{1,8}$/u.test(segment) && same(segment)) return { name: segment, source: 'the task gives by URL', held: false };
+  }
+  return undefined;
 }
 
 /**
@@ -9238,6 +9278,8 @@ export async function runAgent<T = unknown>(
    */
   const runFiles = deps.files;
   let fileManifest: readonly RunFile[] = runFiles === undefined ? [] : await runFiles.list();
+  /** Handles of the files this run made with createFile: never a file it was given. */
+  const createdFileIds = new Set<string>();
   /** Whether the read above still serves the next step, which is the first. */
   let manifestFresh = true;
 
@@ -12711,7 +12753,20 @@ export async function runAgent<T = unknown>(
                     'createFile',
                   );
                 }
+                const given = givenFileNamed(action.file, req.task, fileManifest, createdFileIds, deps.downloads?.() ?? []);
+                if (given !== undefined) {
+                  throw new RefusedActionError(
+                    `createFile: ${JSON.stringify(given.name)} is a file ${given.source}, so no stand-in was made: a file ` +
+                      'made here would not be that file. ' +
+                      (given.held
+                        ? `Attach it as it is, by its name: {"type":"attachFile","ref":"<the file input>","file":${JSON.stringify(given.name)}}.`
+                        : 'Download it in the browser (open its URL or click its link); once it is stored it is listed ' +
+                          "among this run's files, and you attach it by its name with attachFile."),
+                    'createFile',
+                  );
+                }
                 const made = await runFiles.create({ name: action.file, text: action.text });
+                createdFileIds.add(made.fileId);
                 fileManifest = [...fileManifest.filter((file) => file.fileId !== made.fileId), made];
                 outcome = {};
                 break;

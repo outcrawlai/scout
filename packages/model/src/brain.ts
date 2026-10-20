@@ -4054,7 +4054,8 @@ const WEB_TOOLS_RULE =
  */
 const DOWNLOADS_KEPT_RULE =
   'Files the browser downloads are kept for the person who started this run and listed with the run\u2019s downloads: ' +
-  'download a file by clicking its link or opening its URL in the browser, not with code.run, and name the files in the answer.';
+  'download a file by clicking its link or opening its URL in the browser, not with code.run, and name the files in the answer. ' +
+  'A downloaded file is one of the run\u2019s files: to upload it to a page, attach it by its name; never create a stand-in for a file the task gives.';
 
 /** The run's constants: the first user turn's head. Cached with the thread from step two on. */
 function runHeader(prompt: AgentPrompt): string {

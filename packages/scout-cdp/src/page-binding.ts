@@ -3763,8 +3763,8 @@ export function pageBinding(page: CdpPage, options: BindingOptions): AgentDeps {
     if (path === undefined) {
       throw new FilesUnavailableError(
         `no file ${fileId} on this run. Name a file the run holds by the handle listed beside it or by its ` +
-          'exact name. A file reaches a run through POST /v1/agent/{id}/files or createFile, and is destroyed when ' +
-          'its run ends.',
+          'exact name. A file reaches a run through POST /v1/agent/{id}/files, createFile, or a download in the ' +
+          'browser once it is stored, and is destroyed when its run ends.',
       );
     }
 

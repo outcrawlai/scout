@@ -121,3 +121,51 @@ describe('a run whose host can write files may create one and attach it', () => 
     expect(h.performed).toEqual([]);
   });
 });
+
+describe('createFile never makes a stand-in for a file the run was given', () => {
+  // Outcrawl Bench jobs-apply (fleet 2026-10-20, 3 of 3 dev runs, 1 test run):
+  // the task gave a CV by URL, and the run created "cv.pdf" from a sentence
+  // and attached it; the site got 582 bytes for a 2,122-byte file.
+  const TASK = 'Attach my CV, https://bench.example/files/cv.pdf, and use this cover note: I am keen.';
+
+  const refused = async (options: { readonly file: string; readonly held?: RunFile[]; readonly downloaded?: string }) => {
+    const space = fileSpace();
+    const h = harness({
+      model: (_prompt, step) => (step === 0 ? { action: { type: 'createFile', file: options.file, text: 'Jane Doe CV' } } : { action: done }),
+      tree: page,
+    });
+    const files = { ...space.files, list: async () => [...(options.held ?? []), ...(await space.files.list())] };
+    const downloads = options.downloaded === undefined ? [] : [{ id: 'g1', tab: 't0', url: `https://bench.example/files/${options.downloaded}`, filename: options.downloaded }];
+    const result = await runAgent({ ...h.deps, files, downloads: () => downloads }, { task: TASK, caps: CAPS, stepFailures: 0 });
+    return { result, created: space.created };
+  };
+
+  for (const file of ['cv.pdf', 'CV.PDF', 'cv.txt']) {
+    test(`a file the task gives by URL (${file}) is refused, uncharged, with the way to the real one`, async () => {
+      const { result, created } = await refused({ file });
+      expect(created).toEqual([]);
+      expect(result.status).toBe('completed');
+      expect(result.steps[0]?.error).toContain('"cv.pdf" is a file the task gives by URL');
+      expect(result.steps[0]?.error).toContain('Download it in the browser');
+    });
+  }
+
+  test('a file the run holds is refused and named for attachFile', async () => {
+    const { result, created } = await refused({ file: 'certificate.pdf', held: [{ fileId: 'file_dl_g1', name: 'certificate.pdf' }] });
+    expect(created).toEqual([]);
+    expect(result.steps[0]?.error).toContain('this run already holds');
+    expect(result.steps[0]?.error).toContain('"file":"certificate.pdf"');
+  });
+
+  test('a file the run is downloading is refused', async () => {
+    const { result, created } = await refused({ file: 'compliance.pdf', downloaded: 'compliance.pdf' });
+    expect(created).toEqual([]);
+    expect(result.steps[0]?.error).toContain('this run downloaded');
+  });
+
+  test('a file nothing gave is still made', async () => {
+    const { result, created } = await refused({ file: 'cover-note.txt' });
+    expect(created).toEqual([{ name: 'cover-note.txt', text: 'Jane Doe CV' }]);
+    expect(result.steps[0]?.error).toBeUndefined();
+  });
+});
