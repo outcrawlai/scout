@@ -3539,11 +3539,12 @@ export function pageBinding(page: CdpPage, options: BindingOptions): AgentDeps {
     if (after !== undefined && after !== text && text.startsWith(after) && frameId !== undefined) {
       const focused = await inLookWorld(session, frameId, { on: id, declaration: FIELD_HAS_FOCUS, returns: 'value' }).catch(() => undefined);
       if (focused === false) {
-        const held = text === written ? JSON.stringify(after) : `the first ${String(after.length)} characters`;
+        // What happened and what to do first, the field's value last: the
+        // model reads a step's outcome in a line of 150-240 characters.
         throw new Error(
-          `fill: the field holds ${held}, ${String(after.length)} of the ${String(text.length)} characters written: the focus ` +
-            'left the field while typing (a dialog or another element took it), and the rest of the keys went there. ' +
-            'Deal with what took the focus, then fill the field again.',
+          `fill: the focus left the field while typing (a dialog or another element took it), so it holds ${String(after.length)} ` +
+            `of the ${String(text.length)} characters. Deal with that, then fill it again.` +
+            (text === written ? ` It holds ${JSON.stringify(after)}.` : ''),
         );
       }
     }

@@ -2868,7 +2868,7 @@ const HELD_OUTCOME: Readonly<Record<NonNullable<StepTrace['held']>, string>> = {
   'dropped-evidence': 'HELD: the final read leaves out evidence already recorded (see Notice)',
 };
 
-export function traceLine(trace: StepTrace, nodes?: ReadonlyMap<string, AxNode>): string {
+export function traceLine(trace: StepTrace, nodes?: ReadonlyMap<string, AxNode>, max = 240): string {
   const outcome =
     trace.held !== undefined
       ? HELD_OUTCOME[trace.held]
@@ -2882,8 +2882,20 @@ export function traceLine(trace: StepTrace, nodes?: ReadonlyMap<string, AxNode>)
   const ref = 'ref' in trace.action && trace.action.ref !== undefined ? `${String(trace.action.ref.frameOrdinal)}-${String(trace.action.ref.backendNodeId)}` : undefined;
   const node = ref === undefined ? undefined : nodes?.get(ref);
   const what = `${describeAction(trace.action, node)}${ref === undefined ? '' : ` [${ref}]`}`;
-  return clip(`${String(trace.index)}${trace.goal === undefined ? '' : ` [${trace.goal}]`} ${what} -> ${outcome}`, 240);
+  // THE OUTCOME IS KEPT, AND THE ACTION'S DESCRIPTION IS WHAT GIVES WAY. A
+  // fill's description quotes its field's label and the whole text typed, and
+  // clipped as one line the error behind it was what was lost. Fleet
+  // 2026-10-20 (Outcrawl Bench dev venues-hold, run_7f096ca5): a fill failed
+  // "the focus left the field while typing … then fill the field again", the
+  // brain was shown "…the focus left…", went on to the next field and booked
+  // with a cut-off name.
+  const head = `${String(trace.index)}${trace.goal === undefined ? '' : ` [${trace.goal}]`} `;
+  const room = Math.max(MIN_ACTION_CHARS, max - head.length - ' -> '.length - outcome.length);
+  return clip(`${head}${clip(what, room)} -> ${outcome}`, max);
 }
+
+/** The least of an action's description a step line keeps beside a long outcome. */
+const MIN_ACTION_CHARS = 40;
 
 /**
  * What makes two actions "the same" for the repeat detector: the verb and its
@@ -2962,7 +2974,7 @@ export function repeatedActions(
     const key = actionKey(trace.action);
     if (key === undefined) continue;
     const seen = counts.get(key);
-    const transient = transientNavFailure(trace);
+    const transient = transientNavFailure(trace) || interruptedFill(trace);
     const failed = !transient && (trace.error !== undefined || trace.check?.verdict === 'contradicted');
     const times = (seen?.transient ?? 0) + (transient ? 1 : 0);
     counts.set(key, { text: key, count: (seen?.count ?? 0) + 1, failed: (seen?.failed ?? false) || failed || times >= 2, transient: times });
@@ -3038,6 +3050,18 @@ export function transientNavFailure(trace: StepTrace): boolean {
   // URLs are not evidence either way ("…/404-guide" is a page name).
   const words = said.replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, ' ');
   return TRANSIENT_NAV.test(said) && !DEFINITE_NAV.test(words);
+}
+
+/**
+ * Whether a step is a fill the page interrupted: the focus left the field
+ * while it was typed (`performFill` in `@outcrawl/scout-cdp` says so in these
+ * words), so only the start of the text landed. Not the fill's fault, so ONE
+ * exact retry is open, as for a navigate that timed out. Fleet 2026-10-20
+ * (Outcrawl Bench dev venues-hold, run_7f096ca5): the fill was told to run
+ * again, and the repeat guard would have refused it as already failed.
+ */
+export function interruptedFill(trace: StepTrace): boolean {
+  return trace.action.type === 'fill' && trace.error !== undefined && /focus left the field while typing/.test(trace.error);
 }
 
 /**
@@ -3761,9 +3785,9 @@ export class BrainThread {
     const since = this.#lastStep < 0 ? prompt.history.slice(-1) : prompt.history.filter((trace) => trace.index >= this.#lastStep);
     const nodes = refIndex(prompt.tree);
     if (since.length === 1 && since[0] !== undefined) {
-      state.push(`Last: ${clip(traceLine(since[0], nodes), 220)}`);
+      state.push(`Last: ${traceLine(since[0], nodes, 220)}`);
     } else if (since.length > 1) {
-      state.push('Since your last turn:', ...since.slice(-(MACRO_MAX + 1)).map((trace) => `  ${clip(traceLine(trace, nodes), 150)}`));
+      state.push('Since your last turn:', ...since.slice(-(MACRO_MAX + 1)).map((trace) => `  ${traceLine(trace, nodes, 150)}`));
     }
     if (expected.length > 0) {
       state.push(`You expected: ${expected.map((entry) => clip(entry, 60)).join('; ')}`);

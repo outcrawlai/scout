@@ -148,8 +148,9 @@ describe('a fill whose keys went elsewhere fails, and says so', () => {
   test('the field keeps the start of the text and has lost the focus', async () => {
     const { page } = fieldPage('', { selectAllSelects: true, focusLostAt: 38 });
     const filled = bound(page).perform({ type: 'fill', ref: FIELD, text: 'Hollinbridge Camera Club members social' });
-    await expect(filled).rejects.toThrow('the field holds "Hollinbridge Camera Club members socia", 38 of the 39 characters');
     await expect(filled).rejects.toThrow('the focus left the field while typing');
+    await expect(filled).rejects.toThrow('it holds 38 of the 39 characters. Deal with that, then fill it again.');
+    await expect(filled).rejects.toThrow('It holds "Hollinbridge Camera Club members socia".');
   });
 
   test('a field that cuts the text but keeps the focus, as a length limit does, is not refused', async () => {

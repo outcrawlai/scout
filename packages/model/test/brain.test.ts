@@ -9,7 +9,7 @@ import { describe, expect, test } from 'bun:test';
 import type { Clock } from '@outcrawl/scout-core';
 import { CODE_RUN_TOOL, CODE_RUN_TOOL_DESCRIPTION, INBOX_SIGNUP_RULE, PAGE_SCRIPT_REPLY_MAX_CHARS, PAGE_SCRIPT_TOOL, PAGE_SCRIPT_TOOL_DESCRIPTION, codeRunToolPort, codeRunTools, hashSnapshot, nodeRef, pageScriptTools, renderPrompt, type AgentPrompt, type AxNode, type AxTree, type StepTrace, type ToolCallEcho } from '@outcrawl/runtime';
 
-import { BRAIN_BUDGET, BRAIN_SCHEMA, BRAIN_SYSTEM_PROMPT, BrainThread, actionKey, repeatedActions, retryableNavigations, alreadyRead, reloadAsNavigate, briefElements, briefFacts, rankedReadGap, rawBrief, readBrief, readDecision, reconciledNavigate, redirectedSite, searchedBefore, selectBrief as selectBriefWithRefs, directAction, threadReply, unconfirmedSlot, wholeRead, wrongListItem, readWithConditions, comboboxMiss, factsBesideReads, listingVerdicts, toolReplies } from '../src/brain';
+import { BRAIN_BUDGET, BRAIN_SCHEMA, BRAIN_SYSTEM_PROMPT, BrainThread, actionKey, repeatedActions, traceLine, retryableNavigations, alreadyRead, reloadAsNavigate, briefElements, briefFacts, rankedReadGap, rawBrief, readBrief, readDecision, reconciledNavigate, redirectedSite, searchedBefore, selectBrief as selectBriefWithRefs, directAction, threadReply, unconfirmedSlot, wholeRead, wrongListItem, readWithConditions, comboboxMiss, factsBesideReads, listingVerdicts, toolReplies } from '../src/brain';
 import { HarnessModelPort, type ModelPlan } from '../src/harness';
 import { ModelClient } from '../src/client';
 import { CostLedger } from '../src/ledger';
@@ -2652,3 +2652,33 @@ describe('a navigate that only timed out or did not commit', () => {
   });
 });
 
+
+// venues-hold (fleet 2026-10-20, run_7f096ca5): a fill the page interrupted
+// was told to run again; the brain was shown "…the focus left…" and the repeat
+// guard would have refused the retry as already failed.
+describe('a fill the page interrupted', () => {
+  const FIELD = { frameOrdinal: 350, backendNodeId: 1240 };
+  const TEXT = 'Hollinbridge Amateur Dramatic Society annual general meeting';
+  const ERROR =
+    'fill: the focus left the field while typing (a dialog or another element took it), so it holds 50 of the 60 characters. ' +
+    'Deal with that, then fill it again. It holds "Hollinbridge Amateur Dramatic Society annual gener".';
+  const fill = (index: number, error?: string): StepTrace =>
+    ({ index, goal: 'n1', action: { type: 'fill', ref: FIELD, text: TEXT }, ...(error === undefined ? {} : { error }), cache: { status: 'MISS' }, elapsedMs: 1, snapshotHash: 'h', credits: '0', spent: '0', pages: 1, durationMs: 1, usage: {}, at: '2026-10-20T08:24:45.000Z' }) as unknown as StepTrace;
+
+  test('is open to one exact retry; a second interruption rules it out, as does any other failed fill', () => {
+    expect(repeatedActions([fill(0, ERROR)]).size).toBe(0);
+    expect(repeatedActions([fill(0, ERROR), fill(1, ERROR)]).get('fill 350-1240')?.failed).toBe(true);
+    expect(repeatedActions([fill(0, 'fill: no such element')]).get('fill 350-1240')?.failed).toBe(true);
+  });
+
+  test("its step line keeps the error whole and shortens the action instead, at the brain's line lengths", () => {
+    for (const max of [240, 220]) {
+      const line = traceLine(fill(23, ERROR), undefined, max);
+      expect(line.length).toBeLessThanOrEqual(max);
+      expect(line).toContain('Deal with that, then fill it again.');
+    }
+    expect(traceLine(fill(23, ERROR), undefined, 150)).toContain('the focus left the field while typing');
+    // A short outcome leaves the description whole.
+    expect(traceLine(fill(23))).toContain(TEXT);
+  });
+});
