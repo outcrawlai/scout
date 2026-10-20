@@ -236,6 +236,11 @@ export interface PlanModel {
   /** A brain's reasoning effort. Absent sends no reasoning field. */
   readonly effort?: 'minimal' | 'low' | 'medium' | 'high';
   /**
+   * A brain's opening: its first `calls` calls of a run go at `effort`, every
+   * later one at {@link effort}. Absent is {@link effort} throughout.
+   */
+  readonly opening?: { readonly effort: 'minimal' | 'low' | 'medium' | 'high'; readonly calls: number };
+  /**
    * How long an ACTION call to this model may take before the chain stops
    * waiting, for a model whose tail has been measured. Absent is the client's
    * own ceiling. A host `timeoutMs` below it still wins: it is the run's.
@@ -1154,6 +1159,8 @@ export class HarnessModelPort implements ModelPort {
   #stepBrief: StepBrief | undefined;
   /** The trace's own refusals: they quote the untraced names, so they are not what the brain was shown. */
   readonly #untraced: string[] = [];
+  /** Brain calls this run has made, for `PlanModel.opening`. */
+  #brainCalls = 0;
   /** Why the brain's last done was turned into a read, told to it next turn. */
   #held: string | undefined;
   /** True when the current brain step re-decided: its first decision's queue no longer applies. */
@@ -1196,6 +1203,7 @@ export class HarnessModelPort implements ModelPort {
     // The plan's own effort unless the caller overrides it (a measurement).
     const brainReasoning: ReasoningConfig | undefined =
       options.brainReasoning ?? (brain?.effort === undefined ? undefined : { effort: brain.effort });
+    const opening = brain?.opening === undefined ? undefined : { reasoning: { effort: brain.opening.effort }, calls: brain.opening.calls };
     this.#actuators = options.plan.actuators.map((slot) => ({
       slug: slot.model,
       ...(slot.extractHedgeMs === undefined ? {} : { extractHedgeMs: slot.extractHedgeMs }),
@@ -1218,6 +1226,7 @@ export class HarnessModelPort implements ModelPort {
         : {
             slug: brain.model,
             ...(brain.providerOrder === undefined ? {} : { providerOrder: brain.providerOrder }),
+            ...(opening === undefined ? {} : { opening }),
             // Never the host's per-model provider (`providerFor`), whatever the
             // model: a flat-rate subscription provider refuses a multi-turn
             // thread. A host that routes the thread elsewhere says so.
@@ -1617,6 +1626,11 @@ export class HarnessModelPort implements ModelPort {
     once: string,
     spent: { readonly usage?: Usage }[],
   ): Promise<BrainDecision | undefined> {
+    // THE OPENING EFFORT (`PlanModel.opening`): the run's first calls think
+    // harder, every later one at the step effort. An effort switch keeps the
+    // prompt cache (measured on both brain transports, 2026-10-20).
+    const opening = brain.opening !== undefined && this.#brainCalls < brain.opening.calls ? brain.opening.reasoning : undefined;
+    this.#brainCalls += 1;
     let result: ExtractResult;
     try {
       result = await brain.client.extract(
@@ -1629,6 +1643,7 @@ export class HarnessModelPort implements ModelPort {
           ...(brain.providerOrder === undefined ? {} : { providerOrder: brain.providerOrder }),
           salvageTruncated: true,
           ...(this.#signal === undefined ? {} : { signal: this.#signal }),
+          ...(opening === undefined ? {} : { reasoning: opening }),
         },
       );
     } catch (thrown) {
@@ -2560,6 +2575,8 @@ interface BrainSlot {
   readonly providerOrder?: readonly string[];
   readonly client: ModelClient;
   readonly thread: BrainThread;
+  /** {@link PlanModel.opening}, its effort as the request carries it. */
+  readonly opening?: { readonly reasoning: ReasoningConfig; readonly calls: number };
 }
 
 /**

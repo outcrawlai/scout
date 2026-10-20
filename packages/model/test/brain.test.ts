@@ -191,6 +191,32 @@ describe('a brain step', () => {
     expect(choice.action).toEqual({ type: 'done', summary: 'Checked out for $12.00' });
   });
 
+  /**
+   * MUTATIONS THIS CATCHES: the opening effort on every call (the cost of high
+   * throughout), on none, or for one call too many.
+   */
+  test('the run opens at the opening effort for its first brain calls, then the step effort', async () => {
+    const plan = brainPlan({ effort: 'minimal' });
+    const provider = new FakeProvider([
+      eyes(),
+      brain({ do: 'act', a: { type: 'click', ref: '0-11' } }),
+      eyes(),
+      brain({ do: 'act', a: { type: 'scroll', dy: 300 } }),
+      eyes(),
+      brain({ do: 'done', answer: 'Total $12.00' }),
+    ]);
+    const { port } = brainPort(provider, { ...plan, brain: { ...plan.brain!, opening: { effort: 'high', calls: 2 } } });
+    const at = (step: number, history: StepTrace[]) => promptFor(TREE, 'check out', step, history);
+    const click = trace(0, 'h0', { action: { type: 'click', ref: nodeRef(0, 11) } });
+    const scroll = trace(1, 'h1', { action: { type: 'scroll', dy: 300 } });
+
+    expect((await port.choose(at(0, []))).action).toEqual({ type: 'click', ref: nodeRef(0, 11) });
+    expect((await port.choose(at(1, [click]))).action).toEqual({ type: 'scroll', dy: 300 });
+    expect((await port.choose(at(2, [click, scroll]))).action).toEqual({ type: 'done', summary: 'Total $12.00' });
+    const brainAsks = provider.requests.filter((request) => request.model === BRAIN);
+    expect(brainAsks.map((request) => request.reasoning?.effort)).toEqual(['high', 'high', 'low']);
+  });
+
   test('a hands extract is never final and always carries an instruction', async () => {
     const provider = new FakeProvider([
       eyes(),

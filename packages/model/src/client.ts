@@ -923,6 +923,12 @@ export interface ModelCallOptions {
   readonly providerOrder?: readonly string[];
   /** Keep a truncated reply's first complete JSON object. See `ModelRequest.salvageTruncated`. */
   readonly salvageTruncated?: boolean;
+  /**
+   * This call's reasoning, in place of the client's own (`extractReasoning`,
+   * `actionReasoning`). For a caller whose effort varies by call (the
+   * brain's opening calls, `PlanModel.opening`).
+   */
+  readonly reasoning?: ReasoningConfig;
 }
 
 /** Which call of an ask this is, for {@link ModelCallEvent}. */
@@ -1930,6 +1936,7 @@ function callFields(call: ModelCallOptions): {
   tail?: string;
   providerOrder?: readonly string[];
   salvageTruncated?: boolean;
+  reasoning?: ReasoningConfig;
 } {
   return {
     ...(call.signal === undefined ? {} : { signal: call.signal }),
@@ -1938,6 +1945,7 @@ function callFields(call: ModelCallOptions): {
     ...(call.tail === undefined ? {} : { tail: call.tail }),
     ...(call.providerOrder === undefined ? {} : { providerOrder: call.providerOrder }),
     ...(call.salvageTruncated === undefined ? {} : { salvageTruncated: call.salvageTruncated }),
+    ...(call.reasoning === undefined ? {} : { reasoning: call.reasoning }),
   };
 }
 
