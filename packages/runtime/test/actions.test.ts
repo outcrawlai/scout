@@ -82,6 +82,24 @@ describe('validateAction is the trust boundary for model output', () => {
     expect(filled.ok).toBe(true);
   });
 
+  // jobs-apply (fleet 2026-10-20, run_a12880c6) and a probe of the hands'
+  // fallback model (n=6): the file was written in `value` or `text`, never in
+  // `file`, and every attach was refused "file must be a non-empty string".
+  test('an attachFile that names its file in value or text attaches that file', () => {
+    const handle = 'file_dl_63eb3410-4827-4cf2-bf3c-0c400d68205c';
+    const said: readonly [Record<string, unknown>, string][] = [
+      [{ value: handle }, handle],
+      [{ value: `cv.pdf (attached by handle: ${handle})` }, handle],
+      [{ text: 'cv.pdf', value: 'cv.pdf' }, 'cv.pdf'],
+      [{ file: handle, value: 'something else' }, handle],
+    ];
+    for (const [fields, file] of said) {
+      const result = validateAction({ type: 'attachFile', ref: search, ...fields }, page);
+      expect(result.ok ? result.value : result.errors).toEqual({ type: 'attachFile', ref: search, file });
+    }
+    expect(errorsFor({ type: 'attachFile', ref: search })).toContain('file must be a non-empty string');
+  });
+
   test('a fill with no text is refused with its own action quoted and the two actions it can mean (run_…)', () => {
     // HarnessAB 2026-09-26, a lab arm on a fast preview model: 62 of 63
     // schema refusals, in 12 of 39 runs, were this one, and 45 of the 62

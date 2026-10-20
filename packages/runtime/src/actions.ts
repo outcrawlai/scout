@@ -856,6 +856,28 @@ function requireString(input: Record<string, unknown>, key: string, errors: stri
   return value;
 }
 
+/**
+ * The file an `attachFile` named in `value` or `text` instead of `file`: the
+ * handle it contains, else the string itself (a name, which the loop resolves
+ * against the run's own files). `undefined` when neither holds one.
+ *
+ * Measured 2026-10-20 (DevMiss probe, n=6): the hands' fallback model, under
+ * the production reply schema and shown a manifest holding the file, put the
+ * handle in `value` 5 of 6 times and the name in `text`/`value` once, and
+ * never wrote `file`. Fleet 2026-10-20
+ * (Outcrawl Bench dev jobs-apply, run_a12880c6): with the primary
+ * rate-limited, every attach after the CV was stored failed "file must be a
+ * non-empty string" and the application went without it.
+ */
+function misplacedFile(input: Record<string, unknown>): string | undefined {
+  for (const key of ['value', 'text'] as const) {
+    const said = input[key];
+    if (typeof said !== 'string' || said.trim() === '') continue;
+    return /\bfile_[A-Za-z0-9_-]+/.exec(said)?.[0] ?? said.trim();
+  }
+  return undefined;
+}
+
 /** An exact decimal amount: up to 13 whole digits and an optional fraction. The edge's own bound. */
 const PURCHASE_AMOUNT = /^\d{1,13}(\.\d{1,18})?$/u;
 
@@ -1257,7 +1279,7 @@ export function validateAction(action: unknown, tree: AxTree): ValidationResult<
       // resolved against the run's own upload prefix by the executor, so a
       // model inventing one gets a refusal about that file rather than a
       // validation error about a shape it cannot see.
-      const file = requireString(action, 'file', errors);
+      const file = typeof action['file'] === 'string' && action['file'] !== '' ? action['file'] : (misplacedFile(action) ?? requireString(action, 'file', errors));
       if (ref === undefined || file === undefined) {
         return { ok: false, errors };
       }

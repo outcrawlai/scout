@@ -61,7 +61,7 @@ import { pdfDocuments, pdfMarkdown, pdfNotice } from './pdf-document';
 import { textDocumentMarkdown, textDocumentNotice, textDocumentWindow, textDocuments, type TextDocumentRead } from './text-document';
 import { topFrameWatch } from './top-frame';
 import { HIT_SAMPLES, HIT_WINDOW_PX, LANDING_DRAWS, LIST_OPTION_POLL_MS, LIST_OPTION_ROLES, LIST_OPTION_WAIT_MS, LIST_SELECT_SETTLE_MS, MAX_REACH_GESTURE_PX, MAX_REACH_TOTAL_PX, MAX_SCROLLS_TO_REACH, MIN_HITTABLE_PX, PAINTED_DESCENDANT_DEPTH, PAINTED_DESCENDANT_READS, PAINTED_RUN_STEPS, POINT_AIM_PX, REST_EPSILON_PX, SCROLL_PROGRESS_PX, SCROLL_REST_POLL_MS, SCROLL_REST_TIMEOUT_MS, TYPED_LIST_ROLES, normalisedName, textOutsideLists } from './reach';
-import { CLIPPING_SCROLLER, DISMISS_NAME, EDITABLE_FIELD_WIDTH, EDITABLE_FIELDS, EDITABLE_HOST, FILE_INPUT_NEAR, FIXED_OF, FOCUS_TAKES_TEXT, LABELLED_CONTROL_TYPES, MAX_DISMISS_CHECKS, MAX_DISMISS_NAMED, MAX_MIXED_LABEL_READS, MAX_NATIVE_DATE_READS, MODAL_OF, NATIVE_DATE_HOST, NATIVE_DATE_LAYOUT, SAME_CONTROL, SELECT_OF, VISIBLE_PART, asShown, clipFrom, nativeSelect, refusedSubmit, visibleFrom } from './scripts';
+import { CLIPPING_SCROLLER, DISMISS_NAME, EDITABLE_FIELD_WIDTH, EDITABLE_FIELDS, EDITABLE_HOST, FIELD_VALUE, FILE_INPUT_NEAR, FIXED_OF, FOCUS_TAKES_TEXT, LABELLED_CONTROL_TYPES, MAX_DISMISS_CHECKS, MAX_DISMISS_NAMED, MAX_MIXED_LABEL_READS, MAX_NATIVE_DATE_READS, MODAL_OF, NATIVE_DATE_HOST, NATIVE_DATE_LAYOUT, SAME_CONTROL, SELECT_OF, VISIBLE_PART, asShown, clipFrom, nativeSelect, refusedSubmit, visibleFrom } from './scripts';
 
 /**
  * The `Outcrawl.getAXTree` node ceiling this binding asks for, well above the
@@ -123,6 +123,13 @@ const NAVIGATE_POLL_MS = 25;
  * once per document.
  */
 const MAX_PARSE_WAIT_MS = 30_000;
+
+/**
+ * The most Backspaces a fill presses to empty a field it could not select:
+ * about 100 ms each, so a long value costs seconds, and a page that keeps
+ * refilling its own field cannot hold the step longer than this.
+ */
+const MAX_ERASE_KEYS = 500;
 
 /**
  * A binding's camera: `page.look`'s two reads, plus the two the text-captcha
@@ -3480,15 +3487,52 @@ export function pageBinding(page: CdpPage, options: BindingOptions): AgentDeps {
     // typed digits replace what it held. Undeterminable (a frame, a closed
     // shadow root, a session whose frame this world cannot name) keeps the
     // chord, which is what every fill did before.
+    const frameId = await frameIdOf(session, ref).catch(() => undefined);
     const takes =
-      (await frameIdOf(session, ref)
-        .then((frameId) =>
-          frameId === undefined
-            ? undefined
-            : inLookWorld(session, frameId, { on: id, declaration: FOCUS_TAKES_TEXT, returns: 'value' }),
-        )
-        .catch(() => undefined)) ?? 'unknown';
+      (frameId === undefined
+        ? undefined
+        : await inLookWorld(session, frameId, { on: id, declaration: FOCUS_TAKES_TEXT, returns: 'value' }).catch(() => undefined)) ?? 'unknown';
+    /** A native text field's value, read in the look world; `undefined` for anything else. */
+    const valueNow = async (): Promise<string | undefined> => {
+      if (frameId === undefined) return undefined;
+      const value = await inLookWorld(session, frameId, { on: id, declaration: FIELD_VALUE, returns: 'value' }).catch(() => undefined);
+      return typeof value === 'string' ? value : undefined;
+    };
+    const before = takes === 'other' ? undefined : await valueNow();
+    // AN EMPTY FILL CLEARS THE FIELD. It was refused ("fill arrived with no
+    // text to type"), so a model that saw a field hold the wrong text had no
+    // way to empty it (Outcrawl Bench dev venues-hold, fleet 2026-10-20,
+    // run_456e5cd8: `fill ""` refused, then Ctrl+A, which on macOS selects
+    // nothing, and the booking was saved with a garbled name).
+    if (text === '') {
+      if (before === '') return;
+      await dispatchGesture(await hands.press('Control+a'), session);
+      await dispatchGesture(await hands.press('Backspace'), session);
+      await eraseLeft(await valueNow());
+      return;
+    }
     await dispatchGesture(await hands.type(text, { replace: takes !== 'other' }), session);
+    // A FILL REPLACES, and one that appended is put right here. Fleet
+    // 2026-10-20 (Outcrawl Bench dev venues-hold, run_456e5cd8, n=1): a field
+    // that held a partial entry (a dialog opened mid-typing and took the
+    // rest of the keys) was filled again and read back as the partial entry
+    // followed by the whole text, and the booking was saved that way. Why the
+    // select-all did not select is not measured. The field is emptied with
+    // Backspace, which a person uses too, and typed once more. Only a native
+    // text field that held text before is checked, so an empty field (nearly
+    // every fill) costs one read.
+    if (before !== undefined && before !== '' && (await valueNow()) === before + text) {
+      await eraseLeft(before.length + text.length);
+      await dispatchGesture(await hands.type(text, { replace: false }), session);
+    }
+
+    /** Backspace `count` times (a value: its length), the caret at the end of the field. */
+    async function eraseLeft(count: string | number | undefined): Promise<void> {
+      const length = typeof count === 'string' ? count.length : (count ?? 0);
+      for (let pressed = 0; pressed < Math.min(length, MAX_ERASE_KEYS); pressed += 1) {
+        await dispatchGesture(await hands.press('Backspace'), session);
+      }
+    }
   }
 
   /**

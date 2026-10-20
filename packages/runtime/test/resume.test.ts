@@ -336,6 +336,58 @@ describe('classifyIrreversible', () => {
     expect(verdict?.evidence).not.toContain('4242424242424242');
   });
 
+  // jobs-apply (fleet 2026-10-20 06:54Z, run_7f6332df): after a sign-in, three
+  // job-board links were marked suspected, and the drain refused the resume.
+  test('after a password was typed, a plain link is not marked; a submit, a script link and a commit-worded link still are', () => {
+    const site = '/t/abc/jobs';
+    const page = tree(
+      node({
+        role: 'main',
+        children: [
+          node({ role: 'link', name: 'Kestrel Logistics', xpath: `//a[@href="${site}/companies/kestrel"]` }),
+          node({ role: 'link', name: 'Data Analyst', xpath: `//a[@href="${site}/jobs/7044532"]` }),
+          node({ role: 'link', name: 'Apply now', href: `https://jobs.example${site}/jobs/7044532/apply` }),
+          node({ role: 'button', name: 'Continue', xpath: '//button[@type="submit"]' }),
+          node({ role: 'link', name: 'Save job', xpath: '//a[@href="#"]' }),
+          node({ role: 'link', name: 'Withdraw', xpath: '//a[@href="javascript:void(0)"]' }),
+          node({ role: 'link', name: 'Buy now', xpath: `//a[@href="${site}/premium/buy"]` }),
+          node({ role: 'link', name: 'Profile' }),
+        ],
+      }),
+      'https://jobs.example/t/abc/jobs/account',
+    );
+    const history: StepTrace[] = [
+      {
+        index: 0,
+        action: { type: 'fill', ref: ref(), text: 'Ember-harbour-77#' },
+        observed: { ref: '0-1', description: 'fill the textbox "Password" with "Ember-harbour-77#"', method: 'fill', xpath: '//*[@id="f-password"]' },
+        cache: { status: 'MISS', reason: 'test' },
+        elapsedMs: 1,
+        snapshotHash: 'h',
+        credits: '0',
+        spent: '0',
+        pages: 0,
+        durationMs: 0,
+        bandwidthBytes: 0,
+        usage: {},
+        at: '2026-10-20T06:52:40.000Z',
+      },
+    ];
+    const verdictFor = (name: string) => {
+      const target = refOf(page, name);
+      return classifyIrreversible({ action: { type: 'click', ref: target }, node: findNode(page, target), tree: page, history });
+    };
+    expect(verdictFor('Kestrel Logistics')).toBeUndefined();
+    expect(verdictFor('Data Analyst')).toBeUndefined();
+    expect(verdictFor('Apply now')).toBeUndefined();
+    expect(verdictFor('Continue')?.kind).toBe('suspected');
+    expect(verdictFor('Save job')?.kind).toBe('suspected');
+    expect(verdictFor('Withdraw')?.kind).toBe('suspected');
+    expect(verdictFor('Buy now')?.kind).toBe('order');
+    // A link whose destination is not known (a positional xpath) is judged as before.
+    expect(verdictFor('Profile')?.kind).toBe('suspected');
+  });
+
   test('declining a priced offer is not a payment; the same decline on a checkout is still marked', () => {
     // Measured: Honey Birdette's discount popup closes on this label, and a
     // "never pay" rule refused it, so 2 of 3 live checkouts ended on a popup.

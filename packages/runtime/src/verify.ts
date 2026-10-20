@@ -297,6 +297,27 @@ function readBack(node: AxNode): string {
   return normalise(parts.join(' '));
 }
 
+/** The name of the first dialog showing in the tree (`''` when it has none), or `undefined` when none is open. */
+function openDialog(node: AxNode): string | undefined {
+  if (node.role === 'dialog' || node.role === 'alertdialog') return normalise(node.name);
+  for (const child of node.children ?? []) {
+    const found = openDialog(child);
+    if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * What a field held before the text was typed after it, when its value is
+ * that leftover followed by `want` and the leftover is itself the start of
+ * `want` (an earlier entry of it, cut off): else `undefined`. Case-blind.
+ */
+function leftoverOf(value: string, want: string): string | undefined {
+  if (want === '' || value.length <= want.length || !value.toLowerCase().endsWith(want.toLowerCase())) return undefined;
+  const leftover = value.slice(0, value.length - want.length);
+  return want.toLowerCase().startsWith(leftover.trimEnd().toLowerCase()) && leftover.trim() !== '' ? leftover : undefined;
+}
+
 /**
  * Native segmented inputs advance focus as digits are typed. The filtered AX
  * tree flattens their host, leaving spinbuttons separated by literal punctuation.
@@ -962,10 +983,24 @@ export function checkOutcome(expect: Expectation, after: AxTree, held?: boolean)
         // and a page that threw the form away look identical from here, and
         // guessing between them is exactly the invention this check exists to
         // stop.
+        //
+        // EXCEPT that a dialog now over the page is said, because it is the
+        // usual reason and it changes what the model must do next. Fleet
+        // 2026-10-20 (Outcrawl Bench dev venues-hold, run_722c543f and
+        // run_456e5cd8, n=2 of 2): a timed "Are you still there?" dialog opened
+        // mid-typing, took the rest of the keys, and hid the field; the model
+        // read only that the value "cannot be read back", answered the dialog,
+        // and booked with the half-typed name.
+        const dialog = openDialog(after.root);
         return {
           verdict: 'unchecked',
           expected,
-          saw: 'the element is no longer on the page, so its value cannot be read back',
+          saw:
+            dialog === undefined
+              ? 'the element is no longer on the page, so its value cannot be read back'
+              : `a dialog${dialog === '' ? '' : ` ${JSON.stringify(dialog)}`} is open over the page and hides the field, so its value ` +
+                'cannot be read back; keys typed while it opened may have gone to the dialog instead. Answer the dialog, then ' +
+                'read the field and fill it again if it does not hold the whole text',
           settleable: false,
         };
       }
@@ -989,6 +1024,23 @@ export function checkOutcome(expect: Expectation, after: AxTree, held?: boolean)
         return segmented;
       }
       if (value.toLowerCase().includes(want.toLowerCase())) {
+        // TYPED AFTER WHAT THE FIELD ALREADY HELD rather than over it: the text
+        // plus a leftover that is itself the start of the text (an earlier,
+        // cut-off entry of it). Fleet 2026-10-20, run_456e5cd8: a field read
+        // "…members sociaHollinbridge Camera Club members social" and this
+        // confirmed it, because the text is in there. An autocomplete that adds
+        // to the text ("London" → "London, UK") leaves no such leftover.
+        const leftover = leftoverOf(value, want);
+        if (leftover !== undefined) {
+          return {
+            verdict: 'contradicted',
+            expected,
+            saw:
+              `the field reads ${JSON.stringify(value)}: the text was typed after ${JSON.stringify(leftover)}, which the ` +
+              'field already held, instead of replacing it. Fill it with "" to empty it, then fill it again',
+            settleable: false,
+          };
+        }
         return {
           verdict: 'confirmed',
           expected,

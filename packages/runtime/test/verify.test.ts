@@ -244,6 +244,42 @@ describe('a typed value is judged on what the field reads back', () => {
     }
   });
 
+  // venues-hold (fleet 2026-10-20, run_456e5cd8): a cut-off entry, then the
+  // whole text typed after it, read back and confirmed because the text was in it.
+  test('the text typed after an earlier cut-off entry of it is contradicted, and named', () => {
+    const typed = 'Hollinbridge Camera Club members social';
+    const outcome = checkOutcome(
+      expectationOf({ type: 'fill', ref: FIELD, text: typed }),
+      page({ value: `Hollinbridge Camera Club members socia${typed}` }),
+    );
+    expect(outcome.verdict).toBe('contradicted');
+    expect(outcome.saw).toContain('typed after "Hollinbridge Camera Club members socia"');
+    expect(outcome.saw).toContain('Fill it with ""');
+  });
+
+  test('a field that adds to the text, as an autocomplete does, still confirms it', () => {
+    const outcome = checkOutcome(expectationOf({ type: 'fill', ref: FIELD, text: 'London' }), page({ value: 'London, UK' }));
+    expect(outcome.verdict).toBe('confirmed');
+  });
+
+  // venues-hold (fleet 2026-10-20, run_722c543f): a timed dialog opened while
+  // the event name was typed and hid the form; the model read only "cannot be
+  // read back", answered the dialog, and booked with a half-typed name.
+  test('a field hidden by a dialog that opened says the dialog, and that keys may have gone to it', () => {
+    const covered = tree(
+      node({
+        role: 'RootWebArea',
+        name: 'Checkout',
+        children: [node({ role: 'dialog', name: 'Are you still there?', children: [node({ role: 'button', name: 'Keep my hold' })] })],
+      }),
+      'https://shop.example/checkout',
+    );
+    const outcome = checkOutcome(expectationOf(FILL), covered);
+    expect(outcome.verdict).toBe('unchecked');
+    expect(outcome.saw).toContain('a dialog "Are you still there?" is open over the page');
+    expect(outcome.saw).toContain('fill it again');
+  });
+
   test('a fill a mask formatted is confirmed', () => {
     // The shapes measured on production 2026-09-23, the first fills ever read
     // back: 6 of 17 contradicted, each one a mask formatting what was typed.

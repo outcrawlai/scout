@@ -296,6 +296,22 @@ function typedSomethingSensitive(history: readonly StepTrace[]): string | undefi
 }
 
 /**
+ * Where `node` links to, when it is a plain link: role `link` with an `href`
+ * that loads a document (http, https or a path), read from the node's own
+ * `href` or else from the `@href` its xpath names. `undefined` for anything
+ * else, which is judged as a submit: a link with no destination, `#…` or
+ * `javascript:` runs the page's script, which can submit anything. A link
+ * whose xpath is positional and carries no `href` is not known to be plain,
+ * and is judged as before.
+ */
+function plainLinkTo(node: AxNode | undefined): string | undefined {
+  if (node?.role !== 'link') return undefined;
+  const href = node.href ?? /^\/\/a\[@href="([^"]*)"\]$/.exec(node.xpath)?.[1];
+  if (href === undefined || href === '' || href.startsWith('#') || /^\s*javascript:/i.test(href)) return undefined;
+  return /^(https?:)?\/|^[^:]*$/i.test(href) ? href : undefined;
+}
+
+/**
  * Whether this action may ever be replayed, and if not, why.
  *
  * ── IT FAILS TOWARD IRREVERSIBLE, AND THE ASYMMETRY IS TOTAL ─────────────────
@@ -368,6 +384,17 @@ export function classifyIrreversible(
   // A control that undoes or navigates is never marked on context alone.
   // Everything else on a consequential page is.
   if (label !== '' && BENIGN.test(label)) {
+    return undefined;
+  }
+
+  // A PLAIN LINK IS A GET, as `navigate` is (see the note above), so no
+  // context marks it: not a password typed earlier, not a card field on the
+  // page, not the page's URL or heading. Only its own commit wording, read
+  // above, does. Fleet 2026-10-20 06:54Z (Outcrawl Bench dev jobs-apply,
+  // run_7f6332df): after a sign-in, the links "Kestrel Logistics", "Data
+  // Analyst" and "Apply now" were each marked suspected, and the run the drain
+  // handed back was refused its resume.
+  if (action.type === 'click' && plainLinkTo(node) !== undefined) {
     return undefined;
   }
 

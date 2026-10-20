@@ -106,6 +106,18 @@ export const FOCUS_TAKES_TEXT = `function () {
 }`;
 
 /**
+ * The value a native text field holds, or `null` for anything else (a
+ * contenteditable region, a select, a date segment). Read so a `fill` can tell
+ * whether it replaced the field's text or was typed after it. `this` is the
+ * element the fill focused.
+ */
+export const FIELD_VALUE = `function () {
+  if (this.tagName === 'TEXTAREA') return String(this.value);
+  if (this.tagName === 'INPUT' && /^(text|search|url|tel|email|password)$/.test(this.type)) return String(this.value);
+  return null;
+}`;
+
+/**
  * One native `<select>` choice, worked out and made in the LOOK WORLD, where
  * the page's own script sees none of it. `this` is the select or one of its
  * options. The option is matched by `value`, then by the label a person
