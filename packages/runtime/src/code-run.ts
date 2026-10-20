@@ -16,8 +16,20 @@
  * `code-tools.ts`, over HTTP to the `outcrawl-code` Cloudflare Worker
  * (`packages/code-sandbox`), one container per run. NEVER on a fleet Mac: the
  * Macs hold customer sessions, and nothing secret is in the container (owner,
- * 2026-10-18). It has internet, so it does not see the browser's page,
- * cookies or exit; the description says so.
+ * 2026-10-18). It does not see the browser's page, cookies or exit; the
+ * description says so.
+ *
+ * ── No internet on a run with an exit ───────────────────────────────────────
+ *
+ * The container's internet is Cloudflare's, wherever the instance was placed,
+ * never the run's exit. MEASURED 2026-10-20 (n=5 code.run fetches of
+ * ipinfo.io/country on runs with exit DE or US, production): NL, IE, GB, ES,
+ * ES, and each run answered that country as the connection's. The exit is an
+ * account-wide provider credential, which must never enter a container that
+ * runs model-written code as root, so a run that names an exit (or a profile,
+ * which pins one) gets a machine with no internet at all
+ * ({@link CodeRunToolOptions.internet} `false`): its description says it has
+ * none, and every reply repeats it ({@link CODE_RUN_OFFLINE_LINE}).
  *
  * ── Failure is the program's, not the tool's ────────────────────────────────
  *
@@ -163,8 +175,33 @@ export const CODE_RUN_TOOL_DESCRIPTION =
   `attachFile. ${String(CODE_RUN_TIMEOUT_MS / 1000)} s per call, ${String(CODE_RUNS_PER_RUN)} calls ` +
   'per run; each reply says how many are used.';
 
-export function codeRunTools(): readonly ExposedTool[] {
-  return [{ name: CODE_RUN_TOOL, description: CODE_RUN_TOOL_DESCRIPTION, inputSchema: CODE_RUN_INPUT_SCHEMA }];
+/**
+ * {@link CODE_RUN_TOOL_DESCRIPTION} for a run with an exit, whose machine has
+ * no internet: what it is still for, and where pages come from instead.
+ */
+export const CODE_RUN_OFFLINE_TOOL_DESCRIPTION =
+  'Run Python 3 or bash on a private Linux machine that belongs to this run. It has NO internet on this run: every page ' +
+  'this run reads must come through the run\u2019s own exit location, and this machine cannot reach it, so a program that ' +
+  'fetches a URL fails. Read pages with the browser or web.read, and use this for counting, sorting, searching, parsing text ' +
+  'you put in the program, and arithmetic. Each call is a fresh process; files written in /work stay while the run keeps ' +
+  `using the machine. Print what you need to stdout: up to ${CODE_RUN_REPLY_MAX_CHARS.toLocaleString('en-US')} characters ` +
+  'come back. Python has beautifulsoup4, lxml and pandas. It does not see the browser\u2019s page or cookies. Its files never ' +
+  'reach the browser: a file to upload is made with createFile and attached with attachFile. ' +
+  `${String(CODE_RUN_TIMEOUT_MS / 1000)} s per call, ${String(CODE_RUNS_PER_RUN)} calls per run; each reply says how many are used.`;
+
+/** The line every reply on a machine with no internet carries, right after its first line. */
+export const CODE_RUN_OFFLINE_LINE =
+  'This machine has no internet on this run (the run\u2019s pages must come through its own exit location): a fetch from here fails; read pages with the browser or web.read.';
+
+/** The tool as the model sees it; `internet` false for a run with an exit (see the file header). */
+export function codeRunTools(internet = true): readonly ExposedTool[] {
+  return [
+    {
+      name: CODE_RUN_TOOL,
+      description: internet ? CODE_RUN_TOOL_DESCRIPTION : CODE_RUN_OFFLINE_TOOL_DESCRIPTION,
+      inputSchema: CODE_RUN_INPUT_SCHEMA,
+    },
+  ];
 }
 
 type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string };
@@ -298,6 +335,13 @@ export interface CodeRunToolOptions {
   readonly graceMs?: number;
   /** Every call that reached the runner, for the host's log. Must not throw. */
   readonly onCall?: (call: CodeRunCall) => void;
+  /**
+   * Whether the runner's machine has internet. `false` on a run with an exit
+   * (see the file header): the description says the machine has none and
+   * every reply carries {@link CODE_RUN_OFFLINE_LINE}. The RUNNER enforces it;
+   * this only tells the model. Default `true`.
+   */
+  readonly internet?: boolean;
 }
 
 function errorText(error: unknown): string {
@@ -332,7 +376,8 @@ export function codeRunToolPort(options: CodeRunToolOptions): ToolPort {
   const limit = CODE_RUNS_PER_RUN;
   const timeoutMs = options.timeoutMs ?? CODE_RUN_TIMEOUT_MS;
   const waitMs = timeoutMs + (options.graceMs ?? CODE_RUN_GRACE_MS);
-  const tools = codeRunTools();
+  const internet = options.internet ?? true;
+  const tools = codeRunTools(internet);
   let used = options.taken ?? 0;
   let unavailableInRow = 0;
 
@@ -395,7 +440,10 @@ export function codeRunToolPort(options: CodeRunToolOptions): ToolPort {
       log({ outcome: 'no-answer', replyChars: text.length });
       return { isError: true, text, note: text };
     }
-    const reply = codeRunReply(tally, language, outcome.output, timeoutMs);
+    const ran = codeRunReply(tally, language, outcome.output, timeoutMs);
+    // After the first line, which the tally owns (`codeRunsTaken` reads only the start).
+    const cut = ran.indexOf('\n');
+    const reply = internet ? ran : cut === -1 ? `${ran}\n${CODE_RUN_OFFLINE_LINE}` : `${ran.slice(0, cut)}\n${CODE_RUN_OFFLINE_LINE}${ran.slice(cut)}`;
     const text = outcome.output.coldStart && ranBefore ? `${CODE_RUN_WIPED_LINE}\n${reply}` : reply;
     log({ outcome: 'ran', output: outcome.output, replyChars: text.length });
     return { isError: false, text, note: text };

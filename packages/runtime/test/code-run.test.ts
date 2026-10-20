@@ -5,6 +5,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import {
+  CODE_RUN_OFFLINE_LINE,
   CODE_RUN_REPLY_MAX_CHARS,
   CODE_RUN_TOOL,
   CODE_RUN_WIPED_LINE,
@@ -279,5 +280,21 @@ describe('code.run', () => {
       call('code.run (2 of 20) python exited 0 after 0.1 s.\nstdout (20 characters):\ncode.run (19 of 20)\n'),
     ];
     expect(codeRunsTaken(steps)).toBe(2);
+  });
+
+  test('a machine with no internet is described as having none, every reply says so, and the tally still counts', async () => {
+    const port = codeRunToolPort({ runner: answers({ exitCode: 1, stderr: 'ConnectionError: Failed to resolve ipinfo.io\n', coldStart: true }), taken: 2, internet: false });
+    const description = (await port.list())[0]?.description ?? '';
+    expect(description).toContain('NO internet on this run');
+    expect(description).not.toContain('with internet');
+    const out = await port.call(CODE_RUN_TOOL, PY);
+    expect(out.isError).toBe(false);
+    expect(out.text.startsWith(`${CODE_RUN_WIPED_LINE}\ncode.run (3 of 20) python exited with code 1 after 0.4 s.\n${CODE_RUN_OFFLINE_LINE}\nstdout: (empty)\n`)).toBe(true);
+    const step = { index: 0, action: { type: 'callTool', tool: CODE_RUN_TOOL, arguments: PY }, tool: { isError: false, note: out.note } };
+    expect(codeRunsTaken([step as unknown as StepTrace])).toBe(3);
+    // A machine with internet says nothing of the kind.
+    const online = codeRunToolPort({ runner: answers({ stdout: '1' }) });
+    expect((await online.list())[0]?.description).toContain('with internet');
+    expect((await online.call(CODE_RUN_TOOL, PY)).text).not.toContain(CODE_RUN_OFFLINE_LINE);
   });
 });

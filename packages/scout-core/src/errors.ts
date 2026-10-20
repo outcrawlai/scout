@@ -764,13 +764,30 @@ function providerRefusedMessage(url: string, directCause: string | undefined): s
  */
 export const IP_LOOKUP_REFUSED_CAUSE = 'ip_lookup_not_offered';
 
-/** The customer's sentence for {@link IP_LOOKUP_REFUSED_CAUSE}. Shared with the SDKs through `PageUnreachableError`. */
-function ipLookupRefusedMessage(url: string): string {
-  return (
-    `could not open ${url}: IP-lookup sites are not available through our residential network ` +
-    "(a condition of the network we use). To see this session's exit, send the CDP command " +
-    'Outcrawl.getExit, or call browser.exit() in the SDK.'
-  );
+/**
+ * The customer's sentence for {@link IP_LOOKUP_REFUSED_CAUSE}. Shared with the SDKs through `PageUnreachableError`.
+ *
+ * An agent run's brain gets {@link IpLookupAgent}'s variant instead: it cannot
+ * send a CDP command, and on 2026-10-20 (production, n=6 ipinfo.io runs) five
+ * of six brains called `Outcrawl.getExit` or `browser.exit` as a tool after
+ * reading this sentence. It is told the exit the run was started with, when
+ * one was named, which is the customer's own setting.
+ */
+function ipLookupRefusedMessage(url: string, agent: IpLookupAgent | undefined): string {
+  const refused = `could not open ${url}: IP-lookup sites are not available through our residential network (a condition of the network we use).`;
+  if (agent === undefined) {
+    return `${refused} To see this session's exit, send the CDP command Outcrawl.getExit, or call browser.exit() in the SDK.`;
+  }
+  return agent.exit === undefined ? refused : `${refused} This run's exit is in ${agent.exit}: the exit location it was started with.`;
+}
+
+/**
+ * Who reads an {@link IP_LOOKUP_REFUSED_CAUSE} refusal when it is an agent
+ * run's brain: `exit` is the exit the run was started with (a country code,
+ * or `country/region/city`), absent when the run named none.
+ */
+export interface IpLookupAgent {
+  readonly exit: string | undefined;
 }
 
 /**
@@ -840,6 +857,8 @@ export class PageUnreachableError extends OutcrawlError {
     cause: string,
     attribution: UnreachableAttribution = attributionForNetError(cause),
     directCause?: string,
+    /** With {@link IP_LOOKUP_REFUSED_CAUSE} only: the refusal is an agent run's, worded for its brain. */
+    agent?: IpLookupAgent,
   ) {
     const refused = cause === EXIT_PROVIDER_REFUSED_CAUSE;
     const lookup = cause === IP_LOOKUP_REFUSED_CAUSE;
@@ -850,7 +869,7 @@ export class PageUnreachableError extends OutcrawlError {
     super(
       'page_unreachable',
       lookup
-        ? ipLookupRefusedMessage(url)
+        ? ipLookupRefusedMessage(url, agent)
         : refused
           ? providerRefusedMessage(url, directCause)
           : ours
