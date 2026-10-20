@@ -529,7 +529,7 @@ recorded distance. At 3,953 strokes over a 100-600px range the median warp is
 same code against a 900-stroke corpus, where the nearest match is 5-10% away,
 scores 0.019 above its floor.
 
-Three things it found that hand-checking had missed:Three things it found that hand-checking had missed:
+Three things it found that hand-checking had missed:
 
 - **The per-sample jitter was pure error.** Setting it to zero moved direction
   reversals from 0.479 to 0.376 against a human 0.377. It had been added to fix
