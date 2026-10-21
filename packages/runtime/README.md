@@ -387,7 +387,7 @@ satisfying it is a complete test bed. Without this package `POST /v1/agent` and
   solve path is the browser's `Outcrawl.challengeSolving` hold, which a body-signature
   interstitial never raises. The one gate the notice gives an action for is a gate a person
   clears with one press (`INTERSTITIAL_CONTROLS`, today Amazon's "Continue shopping"): the
-  model is told the button's name and that two clicks without the page means the site is
+  model is told the button's name and that two clicks without the page mean the site is
   refusing us — the same cap the scrape path presses to.
 - **A challenge is never quiescent.** `quiescentAt` in `loop.ts` skips the settle for a document
   whose tree has not moved since one answered it; on an interstitial an unmoving tree means the
