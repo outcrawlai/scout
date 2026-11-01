@@ -379,7 +379,7 @@ function readSpendCeiling(text: string): Reading<SpendGate> {
     return {
       gate: undefined,
       smell: FLOOR.test(text)
-        ? 'this states a MINIMUM, and a floor is not something a gate can refuse a dispatch on — only a ceiling is. Rephrase as an upper limit if that is what you meant'
+        ? 'this states a MINIMUM, and a floor is not something a gate can refuse a dispatch on: only a ceiling is. Rephrase as an upper limit if that is what you meant'
         : 'this names an amount and something to spend it on, but no upper limit ("under", "no more than", "never over"), so there is nothing to compare a page total against',
     };
   }
@@ -561,7 +561,7 @@ export function validateRules(input: unknown): ValidationResult<readonly string[
     }
     if (trimmed.length > MAX_RULE_LENGTH) {
       errors.push(
-        `rules[${index}] must be at most ${MAX_RULE_LENGTH} characters, got ${trimmed.length} — a rule is rendered into every prompt of the run`,
+        `rules[${index}] must be at most ${MAX_RULE_LENGTH} characters, got ${trimmed.length}. A rule is rendered into every prompt of the run`,
       );
       return;
     }
